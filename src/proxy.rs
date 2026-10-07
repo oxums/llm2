@@ -1,6 +1,5 @@
 use crate::catalog::Catalog;
 use crate::classifier;
-use crate::config::AppConfig;
 use crate::providers::{self, TranslatedKind};
 use crate::router::*;
 use crate::state::{err, Shared};
@@ -98,7 +97,7 @@ pub async fn models(State(st): State<Shared>, headers: HeaderMap, q: axum::extra
         for d in &cat.decisions {
             data.push(serde_json::json!({"id": format!("{}/{}", d.source, d.slug), "object": "model", "owned_by": d.source}));
         }
-        for (name, a) in &cfg.aliases {
+        for (name, _a) in &cfg.aliases {
             if alias_kind_full(name, &cfg, &cat, &|k| is_decision_member(&cat, k)) == "decision" {
                 data.push(serde_json::json!({"id": name, "object": "model", "owned_by": "alias"}));
             }
@@ -131,12 +130,14 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
     }
     let mut b = body.0;
     let model_field = b.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let stream = b.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let req_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    tracing::info!(req = %req_id, model = %model_field, stream, "incoming chat");
     if model_field.is_empty() {
         record(&st, t0, false, None);
         return err(StatusCode::BAD_REQUEST, "no_model", "missing model field").into_response();
     }
     let flags = extract_flags(&mut b, &headers);
-    let stream = b.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
     let cfg = st.config.read().await.clone();
     let cat = st.catalog.read().await.clone();
@@ -150,7 +151,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
 
     // build candidate list
     let required = required_modalities(&b);
-    let (mut cands, alias_cfg, routed_alias): (Vec<Candidate>, Option<crate::config::AliasConfig>, Option<String>) = match &target {
+    let (cands, alias_cfg, routed_alias): (Vec<Candidate>, Option<crate::config::AliasConfig>, Option<String>) = match &target {
         Target::Direct { provider, model } => {
             if !cfg.providers.contains_key(provider) && crate::providers::default_base(provider).is_none() {
                 record(&st, t0, false, None);
@@ -201,7 +202,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
             });
             c = apply_flags(c, &flags);
             c = filter_modalities(c, &required, None, &cat);
-            c = apply_cooldown(c, &st, &flags);
+            c = order_by_cooldown(c, &st, &flags);
             if c.is_empty() {
                 record(&st, t0, false, None);
                 return err(StatusCode::NOT_FOUND, "no_provider", format!("no available provider for model '{model}'")).into_response();
@@ -222,7 +223,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
             c = order_for_pick(&a, c);
             c = apply_flags(c, &flags);
             c = filter_modalities(c, &required, Some(&a), &cat);
-            c = apply_cooldown(c, &st, &flags);
+            c = order_by_cooldown(c, &st, &flags);
             if c.is_empty() {
                 record(&st, t0, false, None);
                 return err(StatusCode::BAD_REQUEST, "no_models_after_filter", "no alias members left after flags/modality/cooldown filters").into_response();
@@ -233,6 +234,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                 (c, Some(a), Some(name.clone()))
             } else if a.pick_mode == "classifier" {
                 let r = classifier::classify(&st, name, &a, c.clone(), &b).await;
+                tracing::info!(req = %req_id, winner = ?r.winner.member_key, conf = r.confidence, via = %r.via, "classifier picked");
                 let mut ordered = vec![r.winner.clone()];
                 let wk = r.winner.member_key.clone();
                 for x in c {
@@ -248,130 +250,115 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
         }
     };
 
-    // send loop with failover
+    // send loop: SINGLE pass over fresh-first candidates. ANY failure cools
+    // the member and moves on; when the queue is exhausted we return the
+    // last error immediately (fail fast, no second pass, no extra calls).
+    tracing::info!(
+        req = %req_id,
+        queue = %cands.iter().map(|c| format!("{}/{}", c.provider, c.model)).collect::<Vec<_>>().join(","),
+        "candidates"
+    );
     let mut last_err: Option<(StatusCode, String)> = None;
-    let mut tried_cooled_retry = false;
-    let mut queue = cands;
-    loop {
-        let mut progressed = false;
-        let mut i = 0;
-        while i < queue.len() {
-            let c = queue[i].clone();
-            progressed = true;
-            let pcfg = match cfg.providers.get(&c.provider) {
-                Some(p) => p.clone(),
-                None => {
-                    // provider not configured: treat as failed candidate
-                    cool(&st, &cd_key(&c.provider, &c.model));
-                    i += 1;
-                    continue;
-                }
-            };
-            // member-level overrides
-            let (mheaders, mbody) = member_overrides(&alias_cfg, &c);
-            // merge provider keyless check
-            let disp = match providers::build_chat(&st.http, &c.provider, &pcfg, &c.model, b.clone(), &mheaders, &mbody) {
-                Ok(d) => d,
-                Err(e) => {
-                    cool(&st, &cd_key(&c.provider, &c.model));
-                    last_err = Some((StatusCode::BAD_GATEWAY, e));
-                    i += 1;
-                    continue;
-                }
-            };
-            let kind = disp.translated;
-            let req_model_disp = model_field.clone();
-            let send = disp.req.send().await;
-            match send {
-                Err(e) => {
-                    cool(&st, &cd_key(&c.provider, &c.model));
-                    last_err = Some((StatusCode::BAD_GATEWAY, format!("upstream transport: {e}")));
-                    i += 1;
-                    continue;
-                }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    if !(200..300).contains(&status) {
-                        let body_txt = resp.text().await.unwrap_or_default();
-                        if providers::is_retryable(status) {
-                            cool(&st, &cd_key(&c.provider, &c.model));
-                            last_err = Some((StatusCode::from_u16(status.min(599)).unwrap_or(StatusCode::BAD_GATEWAY), body_txt));
-                            i += 1;
-                            continue;
-                        } else {
-                            record(&st, t0, false, None);
-                            let code = StatusCode::from_u16(status.min(599)).unwrap_or(StatusCode::BAD_GATEWAY);
-                            let mut r = Body::from(body_txt).into_response();
-                            *r.status_mut() = code;
-                            r.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                            return r;
-                        }
-                    }
-                    // success
-                    let routed = format!("{}/{}", c.provider, c.model);
-                    if stream {
-                        let s = resp.bytes_stream();
-                        let body_stream: Body = if kind == TranslatedKind::None {
-                            Body::from_stream(s)
-                        } else {
-                            Body::from_stream(providers::translated_stream(kind, req_model_disp, s))
-                        };
-                        record(&st, t0, true, None);
-                        let mut r = body_stream.into_response();
-                        *r.status_mut() = StatusCode::OK;
-                        r.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
-                        r.headers_mut().insert("cache-control", "no-cache".parse().unwrap());
-                        return with_chosen(r, &routed);
-                    } else if kind == TranslatedKind::None {
-                        let bytes = resp.bytes().await.unwrap_or_default();
-                        let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
-                        record(&st, t0, true, usage.as_ref());
-                        let mut r = Body::from(bytes).into_response();
-                        *r.status_mut() = StatusCode::OK;
-                        r.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                        return with_chosen(r, &routed);
-                    } else {
-                        let v: Value = resp.json().await.unwrap_or(Value::Null);
-                        let out = if kind == TranslatedKind::Anthropic {
-                            providers::from_anthropic(&v, &req_model_disp)
-                        } else {
-                            providers::from_google(&v, &req_model_disp)
-                        };
-                        let usage = out.get("usage").cloned();
-                        record(&st, t0, true, usage.as_ref());
-                        let _ = routed_alias;
-                        return with_chosen(Json(out).into_response(), &routed);
-                    }
-                }
+    for cand in &cands {
+        let c = cand.clone();
+        let ck = cd_key(&c.provider, &c.model);
+        let pcfg = match cfg.providers.get(&c.provider) {
+            Some(p) => p.clone(),
+            None => {
+                cool(&st, &ck);
+                last_err = Some((StatusCode::BAD_GATEWAY, format!("provider '{}' not configured", c.provider)));
+                continue;
             }
-        }
-        if !progressed {
-            break;
-        }
-        // all failed. If cooldowns may be blocking others, do one immediate full retry.
-        if !tried_cooled_retry {
-            tried_cooled_retry = true;
-            // rebuild full queue ignoring cooldown (except preferred-bypass already applied)
-            queue = match &target {
-                Target::Alias { name } => {
-                    let a = cfg.aliases.get(name).cloned().unwrap();
-                    let mut c = alias_candidates(name, &cfg, &cat);
-                    c = order_for_pick(&a, c);
-                    c = apply_flags(c, &flags);
-                    c = filter_modalities(c, &required, Some(&a), &cat);
-                    c
-                }
-                _ => break,
-            };
-            if queue.is_empty() {
-                break;
+        };
+        // member-level overrides
+        let (mheaders, mbody) = member_overrides(&alias_cfg, &c);
+        let disp = match providers::build_chat(&st.http, &c.provider, &pcfg, &c.model, b.clone(), &mheaders, &mbody) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, "request build failed: {e}");
+                cool(&st, &ck);
+                last_err = Some((StatusCode::BAD_GATEWAY, e));
+                continue;
             }
+        };
+        let kind = disp.translated;
+        let req_model_disp = model_field.clone();
+        let a0 = Instant::now();
+        let send = tokio::time::timeout(
+            std::time::Duration::from_secs(providers::ATTEMPT_SEND_TIMEOUT_SECS),
+            disp.req.send(),
+        )
+        .await;
+        let resp = match send {
+            Err(_) => {
+                tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, "upstream timeout waiting for headers");
+                cool(&st, &ck);
+                last_err = Some((StatusCode::GATEWAY_TIMEOUT, format!("upstream '{}' timed out", c.provider)));
+                continue;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, "transport error: {e}");
+                cool(&st, &ck);
+                last_err = Some((StatusCode::BAD_GATEWAY, format!("upstream transport: {e}")));
+                continue;
+            }
+            Ok(Ok(r)) => r,
+        };
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body_txt = resp.text().await.unwrap_or_default();
+            tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, status, "upstream error, failing over");
+            cool(&st, &ck);
+            last_err = Some((
+                StatusCode::from_u16(status.min(599)).unwrap_or(StatusCode::BAD_GATEWAY),
+                body_txt.chars().take(2000).collect(),
+            ));
             continue;
         }
-        break;
+        tracing::info!(req = %req_id, provider = %c.provider, model = %c.model, status, ms = a0.elapsed().as_millis() as u64, "served");
+        // success
+        let routed = format!("{}/{}", c.provider, c.model);
+        if stream {
+            let idle = std::time::Duration::from_secs(providers::STREAM_IDLE_TIMEOUT_SECS);
+            let s = resp.bytes_stream();
+            let body_stream: Body = if kind == TranslatedKind::None {
+                Body::from_stream(providers::idle_guard(providers::tap_usage(s, st.clone()), idle))
+            } else {
+                Body::from_stream(providers::idle_guard(
+                    providers::tap_usage(providers::translated_stream(kind, req_model_disp, s), st.clone()),
+                    idle,
+                ))
+            };
+            record(&st, t0, true, None);
+            let mut r = body_stream.into_response();
+            *r.status_mut() = StatusCode::OK;
+            r.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
+            r.headers_mut().insert("cache-control", "no-cache".parse().unwrap());
+            return with_chosen(r, &routed);
+        } else if kind == TranslatedKind::None {
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
+            record(&st, t0, true, usage.as_ref());
+            let mut r = Body::from(bytes).into_response();
+            *r.status_mut() = StatusCode::OK;
+            r.headers_mut().insert("content-type", "application/json".parse().unwrap());
+            return with_chosen(r, &routed);
+        } else {
+            let v: Value = resp.json().await.unwrap_or(Value::Null);
+            let out = if kind == TranslatedKind::Anthropic {
+                providers::from_anthropic(&v, &req_model_disp)
+            } else {
+                providers::from_google(&v, &req_model_disp)
+            };
+            let usage = out.get("usage").cloned();
+            record(&st, t0, true, usage.as_ref());
+            let _ = routed_alias;
+            return with_chosen(Json(out).into_response(), &routed);
+        }
     }
     record(&st, t0, false, None);
     let (code, msg) = last_err.unwrap_or((StatusCode::BAD_GATEWAY, "all providers failed".into()));
+    tracing::warn!(req = %req_id, model = %model_field, "all candidates failed");
     err(code, "all_failed", msg).into_response()
 }
 
@@ -399,6 +386,8 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
     }
     let mut b = body.0;
     let model_field = b.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let req_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    tracing::info!(req = %req_id, model = %model_field, "incoming embeddings");
     let flags = extract_flags(&mut b, &headers);
     let cfg = st.config.read().await.clone();
     let cat = st.catalog.read().await.clone();
@@ -428,7 +417,7 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
             let mut c: Vec<Candidate> = provs.into_iter().map(|p| Candidate { provider: p, model: model.clone(), member_key: None, preferred: false }).collect();
             c.retain(|x| cfg.providers.get(&x.provider).map(|p| p.is_linked()).unwrap_or(false));
             c = apply_flags(c, &flags);
-            c = apply_cooldown(c, &st, &flags);
+            c = order_by_cooldown(c, &st, &flags);
             c
         }
         Target::Alias { name } => {
@@ -440,7 +429,7 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
             let mut c = alias_candidates(name, &cfg, &cat);
             c = order_for_pick(&a, c);
             c = apply_flags(c, &flags);
-            c = apply_cooldown(c, &st, &flags);
+            c = order_by_cooldown(c, &st, &flags);
             if a.pick_mode == "round_robin" && !c.is_empty() {
                 let idx = rr_pick(&st, name, c.len());
                 c.rotate_left(idx);
@@ -465,9 +454,14 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
     }
     let mut last = (StatusCode::BAD_GATEWAY, "all failed".to_string());
     for c in &cands {
+        let ck = cd_key(&c.provider, &c.model);
         let pcfg = match cfg.providers.get(&c.provider) {
             Some(p) => p.clone(),
-            None => continue,
+            None => {
+                cool(&st, &ck);
+                last = (StatusCode::BAD_GATEWAY, format!("provider '{}' not configured", c.provider));
+                continue;
+            }
         };
         if matches!(c.provider.as_str(), "anthropic" | "google" | "typesafe") {
             last = (StatusCode::BAD_REQUEST, format!("provider {} has no embeddings endpoint in v1", c.provider));
@@ -479,6 +473,7 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
         let base = match providers::base_url(&c.provider, &pcfg) {
             Ok(u) => u,
             Err(e) => {
+                cool(&st, &ck);
                 last = (StatusCode::BAD_GATEWAY, e);
                 continue;
             }
@@ -500,38 +495,49 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
         for (k, v) in pcfg.extra_headers.iter().chain(mheaders.iter()) {
             r = r.header(k.as_str(), v.as_str());
         }
-        match r.send().await {
-            Err(e) => {
-                cool(&st, &cd_key(&c.provider, &c.model));
+        let a0 = Instant::now();
+        let send = tokio::time::timeout(
+            std::time::Duration::from_secs(providers::ATTEMPT_SEND_TIMEOUT_SECS),
+            r.send(),
+        )
+        .await;
+        let resp = match send {
+            Err(_) => {
+                tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, "embeddings upstream timeout");
+                cool(&st, &ck);
+                last = (StatusCode::GATEWAY_TIMEOUT, format!("upstream '{}' timed out", c.provider));
+                continue;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, "embeddings transport error: {e}");
+                cool(&st, &ck);
                 last = (StatusCode::BAD_GATEWAY, format!("transport: {e}"));
+                continue;
             }
-            Ok(resp) => {
-                let s = resp.status().as_u16();
-                let bytes = resp.bytes().await.unwrap_or_default();
-                if (200..300).contains(&s) {
-                    let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
-                    record(&st, t0, true, usage.as_ref());
-                    let routed = format!("{}/{}", c.provider, c.model);
-                    let mut r = Body::from(bytes).into_response();
-                    *r.status_mut() = StatusCode::OK;
-                    r.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                    return with_chosen(r, &routed);
-                }
-                let txt = String::from_utf8_lossy(&bytes).to_string();
-                if providers::is_retryable(s) {
-                    cool(&st, &cd_key(&c.provider, &c.model));
-                    last = (StatusCode::from_u16(s.min(599)).unwrap(), txt);
-                } else {
-                    record(&st, t0, false, None);
-                    let mut r = Body::from(bytes).into_response();
-                    *r.status_mut() = StatusCode::from_u16(s.min(599)).unwrap();
-                    r.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                    return r;
-                }
-            }
+            Ok(Ok(r)) => r,
+        };
+        let s = resp.status().as_u16();
+        let bytes = resp.bytes().await.unwrap_or_default();
+        if (200..300).contains(&s) {
+            tracing::info!(req = %req_id, provider = %c.provider, model = %c.model, ms = a0.elapsed().as_millis() as u64, "embeddings served");
+            let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
+            record(&st, t0, true, usage.as_ref());
+            let routed = format!("{}/{}", c.provider, c.model);
+            let mut r = Body::from(bytes).into_response();
+            *r.status_mut() = StatusCode::OK;
+            r.headers_mut().insert("content-type", "application/json".parse().unwrap());
+            return with_chosen(r, &routed);
         }
+        let txt = String::from_utf8_lossy(&bytes).to_string();
+        tracing::warn!(req = %req_id, provider = %c.provider, model = %c.model, status = s, "embeddings upstream error, failing over");
+        cool(&st, &ck);
+        last = (
+            StatusCode::from_u16(s.min(599)).unwrap_or(StatusCode::BAD_GATEWAY),
+            txt.chars().take(2000).collect(),
+        );
     }
     record(&st, t0, false, None);
+    tracing::warn!(req = %req_id, model = %model_field, "all embedding candidates failed");
     err(last.0, "all_failed", last.1).into_response()
 }
 
@@ -547,6 +553,8 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
     }
     let mut b = body.0;
     let model_field = b.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let req_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    tracing::info!(req = %req_id, model = %model_field, "incoming decisions");
     let flags = extract_flags(&mut b, &headers);
     let state_val = b.get("state").cloned().unwrap_or(Value::Null);
     let questions = match b.get("questions").cloned() {
@@ -595,7 +603,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
         }
         // flags on (source-as-provider, slug)
         cands = apply_dec_flags(cands, &flags);
-        cands = apply_dec_cooldown(cands, &st, &flags);
+        cands = order_dec_by_cooldown(cands, &st, &flags);
         if a.pick_mode == "round_robin" && !cands.is_empty() {
             let idx = rr_pick(&st, &model_field, cands.len());
             cands.rotate_left(idx);
@@ -635,7 +643,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
             cands.push((s, slug, None, false));
         }
         cands = apply_dec_flags(cands, &flags);
-        cands = apply_dec_cooldown(cands, &st, &flags);
+        cands = order_dec_by_cooldown(cands, &st, &flags);
     }
     if cands.is_empty() {
         record(&st, t0, false, None);
@@ -646,25 +654,24 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
     let ocfg = cfg.providers.get("openrouter").cloned();
     let mut last = (StatusCode::BAD_GATEWAY, "all failed".to_string());
     for (source, slug, _mk, _pref) in &cands {
+        let a0 = Instant::now();
         match providers::send_decision(&st.http, source, slug, &state_val, &questions, tcfg.as_ref(), ocfg.as_ref(), provider_prefs.as_ref(), 30000).await {
             Ok(mut v) => {
+                tracing::info!(req = %req_id, source = %source, slug = %slug, ms = a0.elapsed().as_millis() as u64, "decision served");
                 record(&st, t0, true, None);
                 let via = format!("{source}/{slug}");
                 v["proxy"] = serde_json::json!({"via": via});
                 return with_chosen((StatusCode::OK, Json(v)).into_response(), &via);
             }
             Err((s, e)) => {
-                if providers::is_retryable(s) || s == 504 {
-                    cool(&st, &cd_key(source, slug));
-                    last = (StatusCode::from_u16(s.min(599)).unwrap(), e);
-                } else {
-                    record(&st, t0, false, None);
-                    return err(StatusCode::from_u16(s.min(599)).unwrap(), "upstream", e).into_response();
-                }
+                tracing::warn!(req = %req_id, source = %source, slug = %slug, status = s, "decision upstream error, failing over");
+                cool(&st, &cd_key(source, slug));
+                last = (StatusCode::from_u16(s.min(599)).unwrap(), e.chars().take(2000).collect());
             }
         }
     }
     record(&st, t0, false, None);
+    tracing::warn!(req = %req_id, model = %model_field, "all decision candidates failed");
     err(last.0, "all_failed", last.1).into_response()
 }
 
@@ -711,13 +718,22 @@ fn apply_dec_flags(mut cands: Vec<(String, String, Option<String>, bool)>, f: &F
     }
 }
 
-fn apply_dec_cooldown(cands: Vec<(String, String, Option<String>, bool)>, st: &Shared, f: &Flags) -> Vec<(String, String, Option<String>, bool)> {
-    cands.into_iter().filter(|(s, slug, _, pref)| {
-        if !is_cooled(st, &cd_key(s, slug)) {
-            return true;
+fn order_dec_by_cooldown(
+    mut cands: Vec<(String, String, Option<String>, bool)>,
+    st: &Shared,
+    f: &Flags,
+) -> Vec<(String, String, Option<String>, bool)> {
+    let mut fresh = vec![];
+    let mut cooled = vec![];
+    for c in cands.drain(..) {
+        if !is_cooled(st, &cd_key(&c.0, &c.1)) || (c.3 && f.prefer_ignore_cooldown) {
+            fresh.push(c);
+        } else {
+            cooled.push(c);
         }
-        *pref && f.prefer_ignore_cooldown
-    }).collect()
+    }
+    fresh.extend(cooled);
+    fresh
 }
 
 // ---------------------------------------------------------------- health

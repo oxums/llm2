@@ -230,28 +230,25 @@ pub fn alias_candidates(alias_name: &str, cfg: &AppConfig, catalog: &Catalog) ->
     out
 }
 
-/// Order candidates per alias pick mode (before flags/cooldown).
+/// Base sequence for an alias: explicit `order` first (in listed order),
+/// then any remaining members. Applies to EVERY pick mode (failover walks it,
+/// round-robin rotates from it, classifier falls back along it).
 pub fn order_for_pick(alias: &AliasConfig, mut cands: Vec<Candidate>) -> Vec<Candidate> {
-    match alias.pick_mode.as_str() {
-        "custom_order" | "failover" => {
-            if alias.order.is_empty() {
-                return cands;
-            }
-            let mut ranked: Vec<(usize, Candidate)> = vec![];
-            let mut rest = vec![];
-            for c in cands.drain(..) {
-                let key = c.member_key.clone().unwrap_or_else(|| format!("{}:{}", c.provider, c.model));
-                if let Some(i) = alias.order.iter().position(|o| o == &key || key_matches(o, &c.provider, &c.model)) {
-                    ranked.push((i, c));
-                } else {
-                    rest.push(c);
-                }
-            }
-            ranked.sort_by_key(|(i, _)| *i);
-            ranked.into_iter().map(|(_, c)| c).chain(rest).collect()
-        }
-        _ => cands, // round_robin handled at pick time; classifier resolves winner first
+    if alias.order.is_empty() {
+        return cands;
     }
+    let mut ranked: Vec<(usize, Candidate)> = vec![];
+    let mut rest = vec![];
+    for c in cands.drain(..) {
+        let key = c.member_key.clone().unwrap_or_else(|| format!("{}:{}", c.provider, c.model));
+        if let Some(i) = alias.order.iter().position(|o| o == &key || key_matches(o, &c.provider, &c.model)) {
+            ranked.push((i, c));
+        } else {
+            rest.push(c);
+        }
+    }
+    ranked.sort_by_key(|(i, _)| *i);
+    ranked.into_iter().map(|(_, c)| c).chain(rest).collect()
 }
 
 pub fn apply_flags(mut cands: Vec<Candidate>, f: &Flags) -> Vec<Candidate> {
@@ -342,16 +339,23 @@ pub fn cool(st: &Shared, key: &str) {
     st.cooldowns.insert(key.to_string(), Instant::now() + Duration::from_secs(60));
 }
 
-pub fn apply_cooldown(mut cands: Vec<Candidate>, st: &Shared, flags: &Flags) -> Vec<Candidate> {
-    cands.retain(|c| {
+/// Partition candidates: fresh first, cooled-down last (stable within groups).
+/// Preferred picks bypass cooldown when allowed. Single pass over the result
+/// tries everything exactly once — cooled members are retried immediately in
+/// turn if nothing fresh is left, then the request fails fast.
+pub fn order_by_cooldown(mut cands: Vec<Candidate>, st: &Shared, flags: &Flags) -> Vec<Candidate> {
+    let mut fresh = vec![];
+    let mut cooled = vec![];
+    for c in cands.drain(..) {
         let k = cd_key(&c.provider, &c.model);
-        if !is_cooled(st, &k) {
-            return true;
+        if !is_cooled(st, &k) || (c.preferred && flags.prefer_ignore_cooldown) {
+            fresh.push(c);
+        } else {
+            cooled.push(c);
         }
-        // preferred picks bypass cooldown when allowed
-        c.preferred && flags.prefer_ignore_cooldown
-    });
-    cands
+    }
+    fresh.extend(cooled);
+    fresh
 }
 
 // ---------------------------------------------------------------- picking

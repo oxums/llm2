@@ -1,7 +1,12 @@
 use crate::config::ProviderConfig;
+use crate::state::Shared;
 use bytes::Bytes;
 use futures_util::Stream;
 use std::collections::HashMap;
+
+/// Max time to wait for upstream response headers per attempt.
+/// Body streaming afterwards is unbounded (ends on client disconnect).
+pub const ATTEMPT_SEND_TIMEOUT_SECS: u64 = 90;
 
 // ---------------------------------------------------------------- base URLs
 
@@ -41,7 +46,9 @@ pub fn base_url(provider: &str, cfg: &ProviderConfig) -> Result<String, String> 
         .ok_or_else(|| format!("provider '{provider}' needs base_url configured"))
 }
 
-/// Providers whose chat API is NOT OpenAI-compatible (need translation).
+/// Providers whose chat API is NOT OpenAI-compatible are handled by the
+/// dedicated translators in build_chat (anthropic, google).
+#[allow(dead_code)]
 pub fn needs_translation(provider: &str) -> bool {
     matches!(provider, "anthropic" | "google")
 }
@@ -58,7 +65,7 @@ pub fn is_unsupported(provider: &str) -> Option<&'static str> {
 pub fn merge_body(mut base: serde_json::Value, extra: &serde_json::Value) -> serde_json::Value {
     if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
         for (k, v) in e {
-            base[k] = v.clone();
+            b[k] = v.clone();
         }
     }
     base
@@ -143,6 +150,10 @@ pub fn build_chat(
         _ => {
             let base = base_url(provider, cfg)?;
             let url = format!("{}/chat/completions", base);
+            // ask for a terminal usage chunk so streamed tokens can be counted
+            if stream && body.get("stream_options").is_none() {
+                body["stream_options"] = serde_json::json!({"include_usage": true});
+            }
             let mut r = http.post(&url).json(&body);
             if !cfg.api_key.is_empty() {
                 r = r.bearer_auth(cfg.api_key.clone());
@@ -158,8 +169,84 @@ pub fn build_chat(
     }
 }
 
-pub fn is_retryable(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 529)
+/// Max silence between upstream SSE chunks before the stream is closed
+/// with a terminal [DONE] (bounds forever-stalled streams; normal token
+/// gaps are seconds, generation can still run for hours total).
+pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
+/// Close a stalled SSE stream with [DONE] after `max_idle` of silence.
+pub fn idle_guard<S, E>(upstream: S, max_idle: std::time::Duration) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    futures_util::stream::unfold((Box::pin(upstream), max_idle, false), |(mut up, max_idle, mut done)| async move {
+        if done {
+            return None;
+        }
+        match tokio::time::timeout(max_idle, futures_util::StreamExt::next(&mut up)).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), (up, max_idle, done))),
+            Ok(Some(Err(e))) => Some((Err(e), (up, max_idle, done))),
+            Ok(None) => None,
+            Err(_) => {
+                done = true;
+                Some((Ok(Bytes::from_static(b"data: [DONE]\n\n")), (up, max_idle, done)))
+            }
+        }
+    })
+}
+
+fn find_num(s: &str, key: &str) -> Option<u64> {
+    let i = s.rfind(key)?;
+    let rest = &s[i + key.len()..];
+    let rest = rest.trim_start_matches(|c| c == ':' || c == ' ' || c == '\t');
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if num.is_empty() {
+        None
+    } else {
+        num.parse().ok()
+    }
+}
+
+fn scan_usage(hay: &[u8]) -> Option<(u64, u64)> {
+    let s = std::str::from_utf8(hay).ok()?;
+    let p = find_num(s, "\"prompt_tokens\"").or_else(|| find_num(s, "\"input_tokens\""))?;
+    let c = find_num(s, "\"completion_tokens\"").or_else(|| find_num(s, "\"output_tokens\""))?;
+    Some((p, c))
+}
+
+/// Wrap an SSE byte stream and credit prompt/completion tokens to metrics
+/// exactly once, when a terminal usage frame passes through. Pass-through
+/// otherwise (chunk sizes unchanged, small tail buffer for split frames).
+pub fn tap_usage<S, E>(upstream: S, st: Shared) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(upstream), st, Vec::<u8>::new(), false),
+        |(mut up, st, mut tail, mut counted)| async move {
+            use std::sync::atomic::Ordering;
+            match futures_util::StreamExt::next(&mut up).await {
+                Some(Ok(chunk)) => {
+                    if !counted {
+                        let mut hay = tail.clone();
+                        hay.extend_from_slice(&chunk);
+                        if let Some((p, c)) = scan_usage(&hay) {
+                            st.metrics.tokens_in.fetch_add(p, Ordering::Relaxed);
+                            st.metrics.tokens_out.fetch_add(c, Ordering::Relaxed);
+                            counted = true;
+                        }
+                        let keep = hay.len().saturating_sub(512);
+                        tail = hay[keep..].to_vec();
+                    }
+                    Some((Ok(chunk), (up, st, tail, counted)))
+                }
+                Some(Err(e)) => Some((Err(e), (up, st, tail, counted))),
+                None => None,
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------- anthropic

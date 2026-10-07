@@ -61,7 +61,7 @@ pub struct ClassifyResult {
 /// Run alias classifier. Returns winner or falls back to alias failover order head.
 pub async fn classify(
     st: &Shared,
-    alias_name: &str,
+    _alias_name: &str,
     alias: &AliasConfig,
     mut cands: Vec<Candidate>,
     body: &Value,
@@ -189,7 +189,7 @@ async fn classify_text(
         format!("{i}: {member} — {d}")
     }).collect::<Vec<_>>().join("\n");
     let sys = format!("{}. Valid options:\n{}\n\nReply with a single JSON object {{\"pick\": <index>}} and nothing else.", alias.classifier.prompt, options_txt);
-    let mut jb = serde_json::json!({
+    let jb = serde_json::json!({
         "model": jm,
         "messages": [
             {"role": "system", "content": sys},

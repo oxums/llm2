@@ -341,6 +341,12 @@ function chatModelOptions() {
 function decisionOptions() {
   return (S.catalog.decisions || []).map((d) => d.source + '/' + d.slug).sort();
 }
+function displayedOrder() {
+  const a = S.draft;
+  const members = Object.keys(a.models || {}).sort();
+  const base = (a.order && a.order.length) ? a.order.filter((o) => members.includes(o)) : members.slice();
+  return base.concat(members.filter((m) => !base.includes(m)));
+}
 function capsBadges(a, key) {
   const m = (a.models || {})[key] || {};
   const ov = m.capabilities_override || {};
@@ -386,13 +392,13 @@ function renderAliases() {
   }).join('');
 
   const members = Object.keys(a.models || {}).sort();
-  const showOrder = a.pick_mode === 'custom_order' || a.pick_mode === 'failover';
-  const baseOrder = (a.order && a.order.length) ? a.order.filter((o) => members.includes(o)) : members.slice();
-  const order = baseOrder.concat(members.filter((m) => !baseOrder.includes(m)));
+  // full display order (order matters in every pick mode now); moves below
+  // always persist the complete sequence so UI and backend agree.
+  const order = displayedOrder();
   const rows = order.map((k) => {
     const m = a.models[k];
     return '<div class="flex items-center gap-2 py-2.5 border-b border-[#1c1c21] last:border-0">' +
-      (showOrder ? '<span class="flex flex-col gap-0.5"><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="-1:' + esc(k) + '">▲</button><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="1:' + esc(k) + '">▼</button></span>' : '') +
+      '<span class="flex flex-col gap-0.5"><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="-1:' + esc(k) + '">▲</button><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="1:' + esc(k) + '">▼</button></span>' +
       '<div class="min-w-0"><div class="code text-[12.5px] text-zinc-100 truncate" title="' + esc(k) + '">' + esc(k) + '</div>' +
       '<div class="flex gap-1.5 mt-1">' + (m.enabled === false ? '<span class="badge b-zinc">disabled</span>' : '') + capsBadges(a, k) +
       (Object.keys(m.extra_headers || {}).length ? '<span class="badge b-zinc">headers</span>' : '') +
@@ -459,12 +465,15 @@ function renderAliases() {
     renderAliases();
   });
   $$('#view-aliases [data-mv]').forEach((b) => b.onclick = () => {
-    const [d, k] = b.dataset.mv.split(/:(.+)/).filter(Boolean);
-    const dir = parseInt(d, 10);
-    if (!(S.draft.order || []).length) S.draft.order = Object.keys(S.draft.models).sort();
-    const o = S.draft.order, i = o.indexOf(k), j = i + dir;
+    const parts = b.dataset.mv.split(/:(.+)/).filter(Boolean);
+    if (parts.length < 2) return;
+    const dir = parseInt(parts[0], 10), k = parts.slice(1).join(':');
+    const o = displayedOrder();
+    const i = o.indexOf(k), j = i + dir;
     if (i < 0 || j < 0 || j >= o.length) return;
-    [o[i], o[j]] = [o[j], o[i]]; renderAliases();
+    const t = o[i]; o[i] = o[j]; o[j] = t;
+    S.draft.order = o;
+    renderAliases();
   });
   $$('#view-aliases [data-hdrs]').forEach((b) => b.onclick = () => openHeadersSheet(b.dataset.hdrs));
   $$('#view-aliases [data-set]').forEach((b) => b.onclick = () => openMemberSheet(b.dataset.set));

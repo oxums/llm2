@@ -8,11 +8,13 @@ use std::time::Instant;
 pub type Shared = Arc<Inner>;
 
 pub struct Inner {
-    pub config: tokio::sync::RwLock<AppConfig>,
+    /// Arc-swapped: readers clone the Arc (no deep copy under lock).
+    pub config: tokio::sync::RwLock<std::sync::Arc<AppConfig>>,
     pub config_path: String,
     pub api_key: tokio::sync::RwLock<String>,
     pub http: reqwest::Client,
-    pub catalog: tokio::sync::RwLock<Catalog>,
+    /// Arc-swapped for the same reason.
+    pub catalog: tokio::sync::RwLock<std::sync::Arc<Catalog>>,
     /// model key -> cooldown expiry
     pub cooldowns: DashMap<String, Instant>,
     /// alias name -> round robin counter
@@ -62,11 +64,11 @@ pub fn new_shared(cfg: AppConfig, config_path: String) -> Shared {
         .build()
         .expect("http client");
     Arc::new(Inner {
-        config: tokio::sync::RwLock::new(cfg),
+        config: tokio::sync::RwLock::new(std::sync::Arc::new(cfg)),
         config_path,
         api_key: tokio::sync::RwLock::new(api_key),
         http,
-        catalog: tokio::sync::RwLock::new(Catalog::default()),
+        catalog: tokio::sync::RwLock::new(std::sync::Arc::new(Catalog::default())),
         cooldowns: DashMap::new(),
         rr: DashMap::new(),
         metrics: Metrics {

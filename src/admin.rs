@@ -109,36 +109,43 @@ pub async fn put_provider(State(st): State<Shared>, headers: HeaderMap, Path(id)
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
     }
     let id = id.to_lowercase();
-    let mut cfg = st.config.write().await;
-    let e = cfg.providers.entry(id.clone()).or_insert_with(ProviderConfig::default);
-    if let Some(k) = patch.get("api_key").and_then(|v| v.as_str()) {
-        e.api_key = k.to_string();
-    }
-    if let Some(b) = patch.get("base_url") {
-        e.base_url = b.as_str().map(|s| s.to_string());
-    }
-    if let Some(h) = patch.get("extra_headers").and_then(|v| v.as_object()) {
-        e.extra_headers = h.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
-    }
-    if let Some(em) = patch.get("enabled_models") {
-        e.enabled_models = if em.is_null() {
-            None
-        } else {
-            em.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-        };
-    }
-    if let Some(v) = patch.get("api_version").and_then(|x| x.as_str()) {
-        e.api_version = Some(v.to_string());
-    }
+    let snapshot = {
+        let mut guard = st.config.write().await;
+        let mut next = (**guard).clone();
+        {
+            let e = next.providers.entry(id.clone()).or_insert_with(ProviderConfig::default);
+            if let Some(k) = patch.get("api_key").and_then(|v| v.as_str()) {
+                e.api_key = k.to_string();
+            }
+            if let Some(b) = patch.get("base_url") {
+                e.base_url = b.as_str().map(|s| s.to_string());
+            }
+            if let Some(h) = patch.get("extra_headers").and_then(|v| v.as_object()) {
+                e.extra_headers = h.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
+            }
+            if let Some(em) = patch.get("enabled_models") {
+                e.enabled_models = if em.is_null() {
+                    None
+                } else {
+                    em.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                };
+            }
+            if let Some(v) = patch.get("api_version").and_then(|x| x.as_str()) {
+                e.api_version = Some(v.to_string());
+            }
+        }
+        let arc = std::sync::Arc::new(next);
+        *guard = arc.clone();
+        arc
+    };
     let path = st.config_path.clone();
-    let snapshot = cfg.clone();
-    drop(cfg);
     if let Err(e) = save_config(&path, &snapshot) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "save", e).into_response();
     }
     // refresh catalog in background (link state may have changed)
     let st2 = st.clone();
     tokio::spawn(async move { refresh_now(&st2).await });
+    tracing::info!(provider = %id, "provider updated");
     Json(serde_json::json!({"ok": true, "id": id})).into_response()
 }
 
@@ -201,14 +208,20 @@ pub async fn put_alias(State(st): State<Shared>, headers: HeaderMap, Path(name):
         }
         let _ = cfg;
     }
-    let mut cfg = st.config.write().await;
-    cfg.aliases.insert(name.clone(), a);
+    let snapshot = {
+        let mut guard = st.config.write().await;
+        let mut next = (**guard).clone();
+        tracing::info!(alias = %name, mode = %a.pick_mode, members = a.models.len(), "alias saving");
+        next.aliases.insert(name.clone(), a);
+        let arc = std::sync::Arc::new(next);
+        *guard = arc.clone();
+        arc
+    };
     let path = st.config_path.clone();
-    let snapshot = cfg.clone();
-    drop(cfg);
     if let Err(e) = save_config(&path, &snapshot) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "save", e).into_response();
     }
+    tracing::info!(alias = %name, "alias saved");
     Json(serde_json::json!({"ok": true, "id": name})).into_response()
 }
 
@@ -217,11 +230,15 @@ pub async fn del_alias(State(st): State<Shared>, headers: HeaderMap, Path(name):
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
     }
-    let mut cfg = st.config.write().await;
-    cfg.aliases.remove(&name);
+    let snapshot = {
+        let mut guard = st.config.write().await;
+        let mut next = (**guard).clone();
+        next.aliases.remove(&name);
+        let arc = std::sync::Arc::new(next);
+        *guard = arc.clone();
+        arc
+    };
     let path = st.config_path.clone();
-    let snapshot = cfg.clone();
-    drop(cfg);
     if let Err(e) = save_config(&path, &snapshot) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "save", e).into_response();
     }
@@ -277,5 +294,5 @@ pub async fn refresh_now(st: &Shared) {
         )
     };
     let cat = crate::catalog::refresh_catalog(&st.http, or_linked, ts_linked).await;
-    *st.catalog.write().await = cat;
+    *st.catalog.write().await = std::sync::Arc::new(cat);
 }

@@ -1,4 +1,4 @@
-# LLM Proxy (`llm2`)
+# llm2
 
 OpenAI-compatible LLM proxy in Rust (Axum): route `provider:model`, `any:model`
 or named **aliases** across ~25 providers, with round-robin / failover /
@@ -72,21 +72,6 @@ stripped before upstream):
 Model key grammar: `provider:model`, `provider/model`, `any:model`, bare `id`
 (matches every provider).
 
-## Aliases
-
-- **chat**: `round_robin` · `failover` (try in order, 60s cooldown on
-  429/5xx, immediate retry if all cooling) · `custom_order` · `classifier`.
-- **embedding** / **decision**: failover-family only (no classifier).
-- Members must be uniform kind (all chat / all embedding / all decision).
-- Multimodal gate: image/audio/video/pdf requests only reach capable models
-  (catalog + per-member overrides); spoofed `/v1/models` advertises the union.
-- Per-member: `extra_headers`, `extra_body` (e.g. `{"service_tier":"fast"}`),
-  capability overrides, `option_description` (classifier criteria text).
-- **Classifier**: backend `jev` (TypeSafe-direct `typesafe/*` or
-  OpenRouter-decisions `openrouter/*`: Choice question over members,
-  `min_confidence` gate → `fallback`) or `text_structured` (chat judge with
-  JSON output). Extra latency accepted by design.
-
 ## Providers
 
 Passthrough (OpenAI-compatible): openai, groq, togetherai, fireworks,
@@ -102,15 +87,3 @@ models.dev omits these, fetched from OpenRouter when linked).
 
 Model catalog: `https://models.dev/api.json` at startup + 12h refresh
 (+ bundled empty fallback offline).
-
-## Notes for 3k req/s
-
-Shared `reqwest` pool (256 idle/host, keepalive), lock-free cooldown/RR maps
-(`DashMap`), `RwLock` config (hot path = reads), zero-copy SSE passthrough,
-10MB body cap, 4096 concurrency limit, per-request atomics for metrics
-(`/api/stats`, `/healthz`).
-
-## Layout
-
-`src/{main,config,state,catalog,providers,router,classifier,proxy,admin,ui}.rs`
-· `ui/{index.html,app.js}` (Tailwind PlayCDN, embedded) · `config.example.json`
