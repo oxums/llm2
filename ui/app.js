@@ -96,29 +96,25 @@ async function boot() {
 function setView(v) {
   S.view = v;
   $$('.navit[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
-  ['overview', 'providers', 'aliases'].forEach((x) => $('#view-' + x).classList.toggle('hidden', x !== v));
+  ['overview', 'providers', 'aliases', 'playground'].forEach((x) => $('#view-' + x).classList.toggle('hidden', x !== v));
   $('#view-title').textContent = v[0].toUpperCase() + v.slice(1);
   if (v === 'overview') renderOverview();
   if (v === 'providers') renderProviders();
   if (v === 'aliases') renderAliases();
+  if (v === 'playground') renderPlayground();
 }
-function renderAll() { setView(S.view); }
+function renderAll() {
+  const linked = (S.catalog.linked || []).length;
+  const np = $('#nav-n-providers'), na = $('#nav-n-aliases');
+  if (np) np.textContent = linked + ' / ' + S.providers.length;
+  if (na) na.textContent = Object.keys(S.aliases).length;
+  setView(S.view);
+}
 
 /* ---------------- overview ---------------- */
-function setupSteps() {
-  const linked = (S.catalog.linked || []).length;
-  const aliases = Object.keys(S.aliases).length;
-  const steps = [
-    { done: linked > 0, t: 'Link a provider', d: linked ? linked + ' linked' : 'Add an API key in Providers' },
-    { done: aliases > 0, t: 'Create an alias', d: aliases ? aliases + ' aliases' : 'Group models with a pick mode' },
-    { done: (S.stats && S.stats.metrics.requests) > 0, t: 'Send traffic', d: 'Point an OpenAI client at /v1' },
-  ];
-  const n = steps.filter((s) => s.done).length;
-  return { steps, n };
-}
 function renderOverview() {
   const m = (S.stats && S.stats.metrics) || {};
-  const { steps, n } = setupSteps();
+  const errRate = m.requests ? (100 * m.errors / Math.max(1, m.requests)).toFixed(1) : '0.0';
   const provRows = S.providers.map((p) =>
     '<div class="flex items-center gap-3 py-2.5 border-b border-[#1c1c21] last:border-0">' +
     '<span class="text-[13px] font-medium w-36 truncate">' + esc(p.id) + '</span>' +
@@ -136,23 +132,19 @@ function renderOverview() {
   }).join('') || '<div class="py-6 text-center text-[13px] text-zinc-600">No aliases yet — create one in the Aliases tab.</div>';
 
   $('#view-overview').innerHTML =
-    '<div class="card mb-5"><div class="flex flex-col md:flex-row">' +
-      '<div class="flex-1 p-5"><div class="text-[13.5px] font-semibold">⚡ Finish setting up your proxy</div>' +
-      '<div class="text-[12.5px] text-zinc-500 mt-1">Link providers, create aliases, then send OpenAI-compatible traffic through <span class="code">/v1</span>.</div>' +
-      '<div class="text-[12px] text-zinc-500 mt-3">' + n + ' of 3 steps complete</div>' +
-      '<div class="h-1.5 rounded-full bg-[#232329] mt-2 overflow-hidden"><div class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-sky-400" style="width:' + Math.round(n / 3 * 100) + '%"></div></div></div>' +
-      '<div class="md:w-[290px] border-t md:border-t-0 md:border-l border-[#232329] p-5"><div class="text-[11px] uppercase tracking-wide text-zinc-500">Up next</div>' +
-      '<div class="text-[13px] font-medium mt-1">' + esc((steps.find((s) => !s.done) || { t: 'All set 🎉' }).t) + '</div>' +
-      '<div class="text-[12px] text-zinc-500">' + esc((steps.find((s) => !s.done) || { d: 'Proxy is ready for traffic.' }).d) + '</div>' +
-      '<button class="btn btn-pri mt-3" data-go="providers">Continue setup</button></div>' +
-    '</div></div>' +
-    '<div class="flex items-center gap-2 mb-3"><h2 class="text-[15px] font-semibold">Overview</h2><div class="ml-auto flex gap-1.5">' +
-      ['All', 'Chat', 'Decisions'].map((t) => '<span class="tab' + (t === 'All' ? ' on' : '') + '">' + t + '</span>').join('') + '</div></div>' +
     '<div class="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-3.5">' +
-      statCard('Requests', fmt(m.requests), 'total proxied') +
-      statCard('Errors', fmt(m.errors), m.requests ? (100 * m.errors / Math.max(1, m.requests)).toFixed(1) + '% error rate' : 'no traffic yet') +
-      statCard('Avg latency', (m.avg_latency_ms || 0) + ' ms', 'proxy overhead + upstream') +
-      statCard('Tokens in / out', fmt(m.tokens_in) + ' / ' + fmt(m.tokens_out), 'prompt / completion') +
+      statCard('Requests', fmt(m.requests),
+        (m.chat || 0) + ' chat · ' + (m.embeddings || 0) + ' emb · ' + (m.decisions || 0) + ' dec',
+        'total proxied', '<span class="badge b-green"><span class="dot"></span>live</span>') +
+      statCard('Errors', fmt(m.errors),
+        errRate + '% error rate', 'failed upstream or bad requests',
+        '<span class="badge ' + (errRate > 1 ? 'b-rose' : 'b-green') + '"><span class="dot"></span>' + errRate + '%</span>') +
+      statCard('Avg latency', (m.avg_latency_ms || 0) + ' ms',
+        'mean proxy + upstream', 'measured per request',
+        '<span class="badge b-zinc">' + fmt(m.requests) + ' req</span>') +
+      statCard('Tokens in / out', fmt(m.tokens_in) + ' / ' + fmt(m.tokens_out),
+        fmt((m.tokens_in || 0) + (m.tokens_out || 0)) + ' total', 'prompt / completion',
+        '<span class="badge b-blue"><span class="dot"></span>tracked</span>') +
     '</div>' +
     '<div class="grid md:grid-cols-2 gap-3.5">' +
       '<div class="card"><div class="card-h"><div class="card-t">Providers</div><div class="card-d">' + (S.catalog.linked || []).length + ' of ' + S.providers.length + ' linked · ' + fmt(S.stats.models) + ' chat models · ' + fmt(S.stats.decision_models) + ' decision models</div></div><div class="card-p !pt-2">' + provRows + '</div></div>' +
@@ -161,13 +153,14 @@ function renderOverview() {
     '<div class="card mt-3.5"><div class="card-h"><div class="card-t">Call the proxy</div><div class="card-d">Drop-in OpenAI base URL — swap the model for <span class="code">provider/model</span>, <span class="code">any/model</span> or an alias.</div></div>' +
     '<div class="card-p"><pre class="code text-[12px] leading-relaxed bg-[#0c0c0e] border border-[#232329] rounded-[10px] p-4 overflow-x-auto text-zinc-300">curl ' + esc(location.origin) + '/v1/chat/completions \\\n  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \\\n  -d \'{"model": "fast", "messages": [{"role": "user", "content": "hi"}],\n       "prefer_models": ["groq/groq-compound-mini"]}\'</pre></div></div>';
 
-  $$('[data-go]').forEach((b) => b.onclick = () => setView(b.dataset.go));
   $$('[data-go-alias]').forEach((b) => b.onclick = () => { S.selAlias = b.dataset.goAlias; S.draft = null; setView('aliases'); });
 }
-function statCard(t, v, d) {
-  return '<div class="card"><div class="p-5"><div class="text-[12.5px] text-zinc-400">' + t + '</div>' +
-    '<div class="text-[30px] font-semibold tracking-tight mt-1">' + v + '</div>' +
-    '<div class="text-[11.5px] text-zinc-600 mt-1 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full border border-sky-500 inline-block"></span>' + d + '</div></div></div>';
+function statCard(t, v, cap, sub, pill) {
+  return '<div class="card"><div class="p-5"><div class="flex items-center gap-2">' +
+    '<div class="eyebrow">' + t + '</div><span class="ml-auto">' + (pill || '') + '</span></div>' +
+    '<div class="text-[32px] font-semibold tracking-tight mt-2">' + v + '</div>' +
+    '<div class="text-[12.5px] text-zinc-300 mt-1.5">' + cap + '</div>' +
+    '<div class="text-[11.5px] text-zinc-600 mt-0.5">' + sub + '</div></div></div>';
 }
 
 /* ---------------- providers ---------------- */
@@ -176,14 +169,15 @@ function renderProviders() {
   const cards = S.providers.map((p) => {
     const kb = KIND_BADGE[p.kind] || 'b-zinc';
     return '<div class="card"><div class="p-5">' +
-      '<div class="flex items-center gap-2"><div class="text-[14.5px] font-semibold capitalize">' + esc(p.id) + '</div>' +
-      '<span class="badge ' + kb + '">' + esc(p.kind || 'chat') + '</span></div>' +
-      '<div class="code text-[11.5px] text-zinc-500 mt-1.5 truncate">' + esc(p.effective_base_url || '—') + '</div>' +
+      '<div class="flex items-center gap-2"><span class="eyebrow">' + esc(p.kind || 'chat') + ' · provider</span>' +
+      '<span class="ml-auto">' + (p.linked
+        ? '<span class="badge b-green"><span class="dot"></span>Configured</span>'
+        : '<span class="badge b-zinc"><span class="dot"></span>Not linked</span>') + '</span></div>' +
+      '<div class="text-[17px] font-semibold tracking-tight capitalize mt-2">' + esc(p.id) + '</div>' +
+      '<div class="code text-[11.5px] text-zinc-500 mt-1 truncate">' + esc(p.effective_base_url || '—') + '</div>' +
       '<div class="text-[12px] text-zinc-500 mt-1">' + fmt(p.models_count) + ' models in catalog</div>' +
-      '<div class="flex items-center mt-4">' +
-      (p.linked ? '<span class="badge b-green"><span class="dot"></span>Configured</span>' : '<span class="badge b-zinc"><span class="dot"></span>Not configured</span>') +
-      '<button class="btn btn-sec ml-auto !text-[12px]" data-cfg="' + esc(p.id) + '">' + (p.linked ? 'Edit →' : 'Configure →') + '</button>' +
-      '</div></div></div>';
+      '<button class="btn btn-sec w-full justify-center mt-4 !text-[12.5px]" data-cfg="' + esc(p.id) + '">' + (p.linked ? 'Edit configuration →' : 'Configure →') + '</button>' +
+      '</div></div>';
   }).join('');
   $('#view-providers').innerHTML = '<div class="grid sm:grid-cols-2 xl:grid-cols-3 gap-3.5">' + cards + '</div>' +
     '<p class="text-[12px] text-zinc-600 mt-4">Keys stay server-side in <span class="code">config.json</span> (gitignored). Bedrock / Vertex / ElevenLabs are listed but unsupported in v1.</p>';
@@ -248,7 +242,7 @@ function openSheet(title, desc, bodyHTML, onSave, saveLabel) {
   $('#sheet-desc').textContent = desc || '';
   $('#sheet-body').innerHTML = bodyHTML;
   $('#sheet-foot').innerHTML = '<button id="sheet-cancel" class="btn btn-ghost">Cancel</button>' +
-    '<button id="sheet-save" class="btn btn-pri">' + esc(saveLabel || 'Save') + '</button>';
+    '<button id="sheet-save" class="btn btn-pri flex-1 justify-center">' + esc(saveLabel || 'Save') + '</button>';
   $('#backdrop').classList.add('open');
   $('#sheet').classList.add('open');
   $('#sheet-cancel').onclick = closeSheet;
@@ -287,6 +281,56 @@ function draftKind(a) {
   if (keys.every(isEmb)) return 'embedding';
   return 'chat';
 }
+function linkedProviders() { return new Set(S.catalog.linked || []); }
+function providerUsable(id) {
+  // linked (has key), or keyless with a custom base URL (e.g. local ollama/lmstudio)
+  if (linkedProviders().has(id)) return true;
+  const pr = (S.providers || []).find((x) => x.id === id);
+  return !!(pr && pr.base_url);
+}
+function providerAllow(id) {
+  const pr = (S.providers || []).find((x) => x.id === id);
+  if (!pr || !pr.enabled_models || !pr.enabled_models.length) return null;
+  return new Set(pr.enabled_models);
+}
+/* models the proxy can actually serve right now */
+function availableChatModels() {
+  const o = [];
+  Object.entries(S.catalog.providers || {}).forEach(([p, arr]) => {
+    if (!providerUsable(p)) return;
+    const allow = providerAllow(p);
+    arr.forEach((m) => {
+      if (m.embedding) return;
+      if (allow && !allow.has(m.id)) return;
+      o.push(p + '/' + m.id);
+    });
+  });
+  return o.sort();
+}
+function availableDecisionModels() {
+  const linked = linkedProviders();
+  return (S.catalog.decisions || [])
+    .filter((d) => linked.has(d.source))
+    .map((d) => d.source + '/' + d.slug).sort();
+}
+function availableEmbeddingModels() {
+  const o = [];
+  Object.entries(S.catalog.providers || {}).forEach(([p, arr]) => {
+    if (!providerUsable(p)) return;
+    const allow = providerAllow(p);
+    arr.forEach((m) => {
+      if (!m.embedding) return;
+      if (allow && !allow.has(m.id)) return;
+      o.push(p + '/' + m.id);
+    });
+  });
+  return o.sort();
+}
+function aliasKindOf(n) {
+  const a = S.aliases[n];
+  if (!a) return 'chat';
+  return a.kind || draftKind(a);
+}
 function chatModelOptions() {
   const o = [];
   Object.entries(S.catalog.providers || {}).forEach(([p, arr]) => {
@@ -309,7 +353,12 @@ function capsBadges(a, key) {
     const hit = grp.find((x) => x.id === mm[2]);
     return hit ? !!hit[cap] : false;
   };
-  const icons = { image: '🖼', audio: '🔊', video: '🎬', pdf: '📄' };
+  const icons = {
+    image: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4.5 18l5-5 3.5 3.5 3-3 3.5 3.5"/></svg>',
+    audio: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6.5 9H3v6h3.5L11 19V5z"/><path d="M15 9a4 4 0 010 6M18 6.5a8 8 0 010 11"/></svg>',
+    video: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="M15.5 10.5l6-3.5v10l-6-3.5"/></svg>',
+    pdf: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2.5h8L19 8v13.5H6z"/><path d="M14 2.5V8h5M9 12h6M9 15.5h6"/></svg>',
+  };
   return ['image', 'audio', 'video', 'pdf'].filter((c) => eff(c))
     .map((c) => '<span class="badge b-blue" title="' + c + '">' + icons[c] + '</span>').join('');
 }
@@ -333,18 +382,18 @@ function renderAliases() {
     const aa = n === S.selAlias ? S.draft : S.aliases[n];
     const k = n === S.selAlias ? kind : draftKind(aa);
     return '<button class="pill' + (n === S.selAlias ? ' on' : '') + '" data-al="' + esc(n) + '">' + esc(n) +
-      ' <span class="badge ' + (k === 'chat' ? 'b-blue' : k === 'embedding' ? 'b-violet' : 'b-amber') + ' !text-[10px]">' + k.slice(0, 3) + '</span></button>';
+      ' <span class="badge ' + (k === 'chat' ? 'b-blue' : k === 'embedding' ? 'b-violet' : 'b-amber') + ' !text-[10px]">' + k + '</span></button>';
   }).join('');
 
   const members = Object.keys(a.models || {}).sort();
   const showOrder = a.pick_mode === 'custom_order' || a.pick_mode === 'failover';
-  const order = (a.order && a.order.length ? a.order.filter((o) => members.includes(o)) : members.slice())
-    .concat(members.filter((m) => !(a.order || []).includes(m)));
+  const baseOrder = (a.order && a.order.length) ? a.order.filter((o) => members.includes(o)) : members.slice();
+  const order = baseOrder.concat(members.filter((m) => !baseOrder.includes(m)));
   const rows = order.map((k) => {
     const m = a.models[k];
     return '<div class="flex items-center gap-2 py-2.5 border-b border-[#1c1c21] last:border-0">' +
       (showOrder ? '<span class="flex flex-col gap-0.5"><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="-1:' + esc(k) + '">▲</button><button class="text-zinc-600 hover:text-white text-[11px] leading-none" data-mv="1:' + esc(k) + '">▼</button></span>' : '') +
-      '<div class="min-w-0"><div class="code text-[12.5px] text-zinc-100 truncate">' + esc(k) + '</div>' +
+      '<div class="min-w-0"><div class="code text-[12.5px] text-zinc-100 truncate" title="' + esc(k) + '">' + esc(k) + '</div>' +
       '<div class="flex gap-1.5 mt-1">' + (m.enabled === false ? '<span class="badge b-zinc">disabled</span>' : '') + capsBadges(a, k) +
       (Object.keys(m.extra_headers || {}).length ? '<span class="badge b-zinc">headers</span>' : '') +
       (m.option_description ? '<span class="badge b-zinc">described</span>' : '') + '</div></div>' +
@@ -356,9 +405,9 @@ function renderAliases() {
       '</div></div>';
   }).join('') || '<div class="py-6 text-center text-[13px] text-zinc-600">No models — add one below.</div>';
 
-  const addOpts = kind === 'decision' ? decisionOptions() : chatModelOptions();
+  const addOpts = kind === 'decision' ? availableDecisionModels() : availableChatModels();
   const pm = a.pick_mode || 'failover';
-  const pmBtn = (v, t) => '<button class="tab flex-1 !text-center' + (pm === v ? ' on' : '') + '" data-pm="' + v + '">' + t + '</button>';
+  const pmBtn = (v, t) => '<button class="tab !text-center !text-[12px] !px-2' + (pm === v ? ' on' : '') + '" data-pm="' + v + '">' + t + '</button>';
 
   $('#view-aliases').innerHTML =
     '<div class="flex items-center gap-2 mb-4 flex-wrap" id="al-pills">' + pills +
@@ -375,10 +424,11 @@ function renderAliases() {
       '<datalist id="dl-models">' + addOpts.slice(0, 2000).map((o) => '<option value="' + esc(o) + '">').join('') + '</datalist>' +
       '<button id="al-addbtn" class="btn btn-sec flex-none">Add</button></div>' +
       (kind === 'decision' && !addOpts.length ? '<p class="text-[12px] text-amber-400/90 mt-2">No decision models: link <b>typesafe</b> and/or <b>openrouter</b> in Providers, then ↻ Refresh catalog.</p>' : '') +
+      (kind !== 'decision' && !addOpts.length ? '<p class="text-[12px] text-amber-400/90 mt-2">No available models — link a provider in Providers first (models from unlinked providers are hidden).</p>' : '') +
       '</div></div>' +
       '<div class="card"><div class="card-h"><div class="card-t">Pick mode</div><div class="card-d">How a member is chosen per request</div></div>' +
-      '<div class="card-p space-y-3"><div class="flex gap-1 bg-[#0c0c0e] border border-[#232329] rounded-[10px] p-1">' +
-        pmBtn('round_robin', 'Round Robin') + pmBtn('classifier', 'Classifier') + pmBtn('custom_order', 'Custom Order') + '</div>' +
+      '<div class="card-p space-y-3"><div class="grid grid-cols-2 gap-1 bg-[#0c0c0e] border border-[#232329] rounded-[10px] p-1">' +
+        pmBtn('round_robin', 'Round Robin') + pmBtn('failover', 'Failover') + pmBtn('classifier', 'Classifier') + pmBtn('custom_order', 'Custom Order') + '</div>' +
         '<div id="pm-body">' + pmBody(a, kind) + '</div>' +
         (kind === 'chat' ? spoofHTML(a) : '') +
       '</div></div>' +
@@ -435,7 +485,7 @@ function pmBody(a, kind) {
   if (a.pick_mode === 'classifier') {
     const c = a.classifier || {};
     const be = c.backend || 'jev';
-    const modelOpts = be === 'jev' ? decisionOptions() : chatModelOptions();
+    const modelOpts = be === 'jev' ? availableDecisionModels() : availableChatModels();
     const members = Object.keys(a.models || {}).sort();
     return '<div class="space-y-3">' +
       '<div><label class="lbl">Backend</label><select id="c-be" class="inp">' +
@@ -458,11 +508,13 @@ function pmBody(a, kind) {
 function spoofHTML(a) {
   const g = (k) => {
     const v = (a.capabilities_spoof || {})[k] || 'auto';
-    return '<label class="text-[11.5px] text-zinc-500">' + k + '</label><select data-spoof="' + k + '" class="inp !py-1 !text-[12px]">' +
-      ['auto', 'on', 'off'].map((o) => '<option' + (o === v ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>';
+    return '<div class="flex items-center justify-between gap-2 bg-[#0c0c0e] border border-[#232329] rounded-[9px] px-2.5 py-1.5">' +
+      '<span class="text-[12px] text-zinc-400">' + k + '</span>' +
+      '<select data-spoof="' + k + '" class="inp !w-auto !py-1 !px-2 !text-[12px]">' +
+      ['auto', 'on', 'off'].map((o) => '<option' + (o === v ? ' selected' : '') + '>' + o + '</option>').join('') + '</select></div>';
   };
   return '<div><label class="lbl">Advertised capabilities <span class="text-zinc-600">(spoofed /v1/models)</span></label>' +
-    '<div class="grid grid-cols-4 gap-2">' + g('image') + g('audio') + g('video') + g('pdf') + '</div></div>';
+    '<div class="grid grid-cols-2 gap-1.5">' + g('image') + g('audio') + g('video') + g('pdf') + '</div></div>';
 }
 function wirePmBody(a, kind) {
   if (!$('#c-be')) return;
@@ -501,6 +553,340 @@ async function saveAlias() {
     await api('/api/aliases/' + encodeURIComponent(S.selAlias), { method: 'PUT', body: JSON.stringify(S.draft) });
     toast('Alias saved'); await loadAll(); renderAliases();
   } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------------- playground ---------------- */
+function pgState() {
+  if (!S.pg) S.pg = {
+    endpoint: 'chat', target: '', sys: '',
+    msgs: [{ role: 'user', content: 'Hello! Who are you?' }],
+    temperature: '0.7', max_tokens: '', top_p: '', freq: '', pres: '',
+    stop: '', stream: true, resp_format: 'none', rawMode: false, raw: '',
+    emb_input: 'Hello world', emb_dim: '', emb_enc: 'float',
+    dec_state: 'My checkout page shows a blank screen after I click Pay.',
+    dec_questions: '{\n  "team": {\n    "type": "choice",\n    "instructions": "Which team should own this ticket?",\n    "criteria": {\n      "payments": "Checkout, billing, or payment issues",\n      "frontend": "Rendering, layout, or browser issues",\n      "account": "Login, permissions, or profile issues"\n    }\n  }\n}',
+    flags: { ignore: '', prefer: '', only_p: '', only_m: '', any_pref: '', no_cool: true },
+    result: null, history: [], streaming: false, abort: null, reqBody: null, streamText: '',
+  };
+  return S.pg;
+}
+function pgTargets(ep) {
+  const an = Object.keys(S.aliases).sort();
+  if (ep === 'decisions') return an.filter((n) => aliasKindOf(n) === 'decision').concat(availableDecisionModels());
+  if (ep === 'embeddings') return an.filter((n) => aliasKindOf(n) === 'embedding').concat(availableEmbeddingModels());
+  return an.filter((n) => aliasKindOf(n) === 'chat').concat(availableChatModels());
+}
+function pgEndpointPath(ep) {
+  return ep === 'chat' ? '/v1/chat/completions' : ep === 'embeddings' ? '/v1/embeddings' : '/v1/decisions';
+}
+function csv(s) { return String(s || '').split(',').map((x) => x.trim()).filter(Boolean); }
+function numOrUndef(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (!t) return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function renderPlayground() {
+  const P = pgState();
+  const tgts = pgTargets(P.endpoint);
+  if (!P.target || !tgts.includes(P.target)) P.target = tgts[0] || '';
+  const epTab = (v, t) => '<button class="tab flex-1 !text-center' + (P.endpoint === v ? ' on' : '') + '" data-ep="' + v + '">' + t + '</button>';
+
+  let form = '';
+  if (P.endpoint === 'chat' && !P.rawMode) {
+    const rows = P.msgs.map((m, i) =>
+      '<div class="flex gap-2 items-start">' +
+      '<select data-msg-role="' + i + '" class="inp !w-[110px] flex-none">' +
+      ['system', 'user', 'assistant'].map((r) => '<option' + (m.role === r ? ' selected' : '') + '>' + r + '</option>').join('') + '</select>' +
+      '<textarea data-msg-content="' + i + '" class="inp" rows="2">' + esc(m.content) + '</textarea>' +
+      '<button class="btn btn-ghost !px-2 flex-none" data-msg-del="' + i + '">✕</button></div>').join('');
+    form =
+      '<div><label class="lbl">System prompt <span class="text-zinc-600">(optional)</span></label>' +
+      '<textarea id="pg-sys" class="inp" rows="2" placeholder="You are a helpful assistant.">' + esc(P.sys) + '</textarea></div>' +
+      '<div><label class="lbl">Messages</label><div class="space-y-2" id="pg-msgs">' + rows + '</div>' +
+      '<button id="pg-addmsg" class="btn btn-sec !text-[12px] mt-2">+ Add message</button></div>' +
+      '<div><label class="lbl">Sampling & limits</label><div class="grid grid-cols-3 gap-2">' +
+      pgNum('temperature', P.temperature, '0.7') + pgNum('max_tokens', P.max_tokens, '1024') + pgNum('top_p', P.top_p, '1') +
+      pgNum('frequency_penalty', P.freq, '0') + pgNum('presence_penalty', P.pres, '0') +
+      '<div><label class="lbl">stop</label><input id="pg-stop" class="inp code" placeholder="a,b" value="' + esc(P.stop) + '"></div>' +
+      '</div></div>' +
+      '<div class="grid grid-cols-2 gap-2">' +
+      '<div><label class="lbl">response_format</label><select id="pg-rf" class="inp">' +
+      ['none', 'json_object'].map((o) => '<option' + (P.resp_format === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select></div>' +
+      '<div class="flex items-center gap-2.5 pt-6"><div class="switch' + (P.stream ? ' on' : '') + '" id="pg-stream"></div><span class="text-[13px]">Stream</span></div>' +
+      '</div>';
+  } else if (P.endpoint === 'chat' && P.rawMode) {
+    form = '<div><label class="lbl">Raw JSON body <span class="text-zinc-600">(sent as-is, plus flags)</span></label>' +
+      '<textarea id="pg-raw" class="inp code" rows="14" spellcheck="false">' + esc(P.raw || JSON.stringify({ model: P.target, messages: [{ role: 'user', content: 'hi' }] }, null, 2)) + '</textarea></div>';
+  } else if (P.endpoint === 'embeddings') {
+    form = '<div><label class="lbl">Input</label><textarea id="pg-emb-in" class="inp" rows="4">' + esc(P.emb_input) + '</textarea></div>' +
+      '<div class="grid grid-cols-2 gap-2"><div><label class="lbl">dimensions</label>' +
+      '<input id="pg-emb-dim" type="number" class="inp code" placeholder="auto" value="' + esc(P.emb_dim) + '"></div>' +
+      '<div><label class="lbl">encoding_format</label><select id="pg-emb-enc" class="inp">' +
+      ['float', 'base64'].map((o) => '<option' + (P.emb_enc === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select></div></div>';
+  } else {
+    form = '<div><label class="lbl">State <span class="text-zinc-600">(text or JSON)</span></label>' +
+      '<textarea id="pg-dec-state" class="inp" rows="3">' + esc(P.dec_state) + '</textarea></div>' +
+      '<div><label class="lbl">Questions <span class="text-zinc-600">(choice / noul / score)</span></label>' +
+      '<textarea id="pg-dec-q" class="inp code" rows="12" spellcheck="false">' + esc(P.dec_questions) + '</textarea></div>';
+  }
+
+  const F = P.flags;
+  const flags =
+    '<details class="set"><summary class="px-3.5 py-2.5 text-[12.5px] font-medium text-zinc-400">Request flags <span class="text-zinc-600">· routing overrides, stripped upstream</span></summary>' +
+    '<div class="px-3.5 pb-3.5 pt-1 grid grid-cols-2 gap-2">' +
+    pgFlag('ignore', F.ignore, 'ignore_models') + pgFlag('prefer', F.prefer, 'prefer_models') +
+    pgFlag('only_p', F.only_p, 'only_providers') + pgFlag('only_m', F.only_m, 'only_models') +
+    '<div><label class="lbl">any_prefer_provider</label><input id="pg-f-any_pref" class="inp code" placeholder="groq" value="' + esc(F.any_pref) + '"></div>' +
+    '<div class="flex items-center gap-2.5 pt-6"><div class="switch' + (F.no_cool ? ' on' : '') + '" id="pg-f-no_cool"></div><span class="text-[12.5px]">prefer bypasses cooldown</span></div>' +
+    '</div></details>';
+
+  $('#view-playground').innerHTML =
+    '<div class="flex gap-1 bg-[#131316] border border-[#232329] rounded-[10px] p-1 w-fit mb-4">' + epTab('chat', 'Chat') + epTab('embeddings', 'Embeddings') + epTab('decisions', 'Decisions') + '</div>' +
+    '<div class="grid lg:grid-cols-2 gap-3.5 items-start">' +
+    '<div class="card"><div class="card-h"><div class="card-t">Request</div><div class="card-d">' + esc(pgEndpointPath(P.endpoint)) + '</div></div>' +
+    '<div class="card-p space-y-3">' +
+    '<div><label class="lbl">Model or alias</label><div class="flex gap-2">' +
+    '<input id="pg-target" list="dl-pg" class="inp code" placeholder="' + (tgts[0] ? esc(tgts[0]) : 'link a provider first') + '" value="' + esc(P.target) + '">' +
+    '<datalist id="dl-pg">' + tgts.slice(0, 2000).map((o) => '<option value="' + esc(o) + '">').join('') + '</datalist>' +
+    (P.endpoint === 'chat' ? '<button id="pg-rawbtn" class="btn btn-sec flex-none !text-[12px]">' + (P.rawMode ? 'Form' : 'Raw JSON') + '</button>' : '') +
+    '</div>' + (!tgts.length ? '<p class="text-[12px] text-amber-400/90 mt-1.5">Nothing routable — link a provider or create an alias first.</p>' : '') + '</div>' +
+    form + flags +
+    '<div class="flex gap-2">' +
+    (P.streaming
+      ? '<button id="pg-stop2" class="btn btn-danger flex-1 justify-center">Stop</button>'
+      : '<button id="pg-send" class="btn btn-pri flex-1 justify-center">Send request</button>') +
+    '<button id="pg-curl" class="btn btn-sec !text-[12px]">Copy as cURL</button></div>' +
+    '</div></div>' +
+    '<div class="space-y-3.5"><div class="card"><div class="card-h"><div class="card-t">Response</div><div class="card-d" id="pg-meta">' + pgMeta(P.result) + '</div></div>' +
+    '<div class="card-p"><pre id="pg-out" class="code text-[12px] leading-relaxed bg-[#0c0c0e] border border-[#232329] rounded-[10px] p-4 overflow-auto max-h-[520px] whitespace-pre-wrap break-words text-zinc-300">' +
+    (P.streaming ? esc(P.streamText || '') + '<span class="animate-pulse">▍</span>' : P.result ? esc(P.result.text) : '—') + '</pre>' +
+    (P.result ? '<div class="flex gap-2 mt-3"><button id="pg-copy" class="btn btn-sec !text-[12px]">Copy response</button></div>' : '') +
+    '</div></div>' +
+    '<div class="card"><div class="card-h"><div class="card-t">History</div><div class="card-d">last runs this session</div></div>' +
+    '<div class="card-p !pt-2">' + pgHistory() + '</div></div>' +
+    '</div></div>';
+
+  wirePlayground();
+}
+function pgNum(id, val, ph) {
+  const labels = { temperature: 'temperature', max_tokens: 'max_tokens', top_p: 'top_p', frequency_penalty: 'freq. penalty', presence_penalty: 'pres. penalty' };
+  return '<div><label class="lbl">' + labels[id] + '</label><input id="pg-' + id + '" class="inp code" placeholder="' + ph + '" value="' + esc(val) + '"></div>';
+}
+function pgFlag(id, val, name) {
+  return '<div><label class="lbl">' + name + '</label><input id="pg-f-' + id + '" class="inp code" placeholder="a, b" value="' + esc(val) + '"></div>';
+}
+function pgMeta(r) {
+  if (!r) return 'Run a request to see output.';
+  const parts = ['<span class="badge ' + (r.ok ? 'b-green' : 'b-rose') + '">' + (r.ok ? r.status : 'ERR ' + r.status) + '</span>',
+    '<span class="badge b-zinc">' + r.ms + ' ms</span>'];
+  if (r.model) parts.push('<span class="badge b-blue">' + esc(r.model) + '</span>');
+  return '<span class="flex items-center gap-1.5 flex-wrap">' + parts.join('') + '</span>';
+}
+function pgHistory() {  const H = pgState().history;
+  if (!H.length) return '<div class="py-4 text-center text-[12.5px] text-zinc-600">No runs yet.</div>';
+  return H.map((h) =>
+    '<div class="flex items-center gap-2.5 py-2 border-b border-[#1c1c21] last:border-0">' +
+    '<span class="badge ' + (h.ok ? 'b-green' : 'b-rose') + '">' + (h.ok ? h.status : 'ERR ' + h.status) + '</span>' +
+    '<span class="code text-[12px] truncate">' + esc(h.target) + '</span>' +
+    (h.model ? '<span class="badge b-blue">' + esc(h.model) + '</span>' : '') +
+    '<span class="ml-auto text-[11.5px] text-zinc-500 flex-none">' + h.ms + ' ms</span></div>').join('');
+}
+
+function pgCollect() {
+  const P = pgState();
+  P.target = $('#pg-target').value.trim();
+  if (P.endpoint === 'chat' && !P.rawMode) {
+    P.sys = $('#pg-sys').value;
+    P.temperature = $('#pg-temperature').value; P.max_tokens = $('#pg-max_tokens').value;
+    P.top_p = $('#pg-top_p').value; P.freq = $('#pg-frequency_penalty').value;
+    P.pres = $('#pg-presence_penalty').value; P.stop = $('#pg-stop').value;
+    P.resp_format = $('#pg-rf').value;
+  } else if (P.endpoint === 'chat' && P.rawMode) {
+    P.raw = $('#pg-raw').value;
+  } else if (P.endpoint === 'embeddings') {
+    P.emb_input = $('#pg-emb-in').value; P.emb_dim = $('#pg-emb-dim').value; P.emb_enc = $('#pg-emb-enc').value;
+  } else {
+    P.dec_state = $('#pg-dec-state').value; P.dec_questions = $('#pg-dec-q').value;
+  }
+  P.flags.ignore = $('#pg-f-ignore').value; P.flags.prefer = $('#pg-f-prefer').value;
+  P.flags.only_p = $('#pg-f-only_p').value; P.flags.only_m = $('#pg-f-only_m').value;
+  P.flags.any_pref = $('#pg-f-any_pref').value;
+}
+function pgCollectMsgs() {
+  const P = pgState();
+  P.msgs = $$('#view-playground [data-msg-role]').map((x, i) => {
+    const c = $('#view-playground [data-msg-content="' + i + '"]');
+    return { role: x.value, content: c ? c.value : '' };
+  });
+}
+function pgBuildBody() {
+  const P = pgState();
+  const F = P.flags;
+  const fl = {};
+  if (csv(F.ignore).length) fl.ignore_models = csv(F.ignore);
+  if (csv(F.prefer).length) fl.prefer_models = csv(F.prefer);
+  if (csv(F.only_p).length) fl.only_providers = csv(F.only_p).map((s) => s.toLowerCase());
+  if (csv(F.only_m).length) fl.only_models = csv(F.only_m);
+  if (F.any_pref.trim()) fl.any_prefer_provider = F.any_pref.trim().toLowerCase();
+  fl.prefer_models_ignore_cooldown = !!F.no_cool;
+  if (P.endpoint === 'chat') {
+    if (P.rawMode) {
+      const b = JSON.parse(P.raw || '{}');
+      Object.assign(b, fl);
+      return b;
+    }
+    const msgs = [];
+    if (P.sys.trim()) msgs.push({ role: 'system', content: P.sys });
+    P.msgs.forEach((m) => msgs.push({ role: m.role, content: m.content }));
+    const b = Object.assign({ model: P.target, messages: msgs }, fl);
+    const t = numOrUndef(P.temperature); if (t !== undefined) b.temperature = t;
+    const mt = numOrUndef(P.max_tokens); if (mt !== undefined) b.max_tokens = Math.round(mt);
+    const tp = numOrUndef(P.top_p); if (tp !== undefined) b.top_p = tp;
+    const fp = numOrUndef(P.freq); if (fp !== undefined) b.frequency_penalty = fp;
+    const pp = numOrUndef(P.pres); if (pp !== undefined) b.presence_penalty = pp;
+    if (P.stop.trim()) b.stop = csv(P.stop);
+    if (P.resp_format === 'json_object') b.response_format = { type: 'json_object' };
+    if (P.stream) b.stream = true;
+    return b;
+  }
+  if (P.endpoint === 'embeddings') {
+    const b = Object.assign({ model: P.target, input: P.emb_input }, fl);
+    const d = numOrUndef(P.emb_dim); if (d !== undefined) b.dimensions = Math.round(d);
+    if (P.emb_enc && P.emb_enc !== 'float') b.encoding_format = P.emb_enc;
+    return b;
+  }
+  let st = P.dec_state;
+  try { st = JSON.parse(P.dec_state); } catch (e) {}
+  return Object.assign({ model: P.target, state: st, questions: JSON.parse(P.dec_questions || '{}') }, fl);
+}
+
+function wirePlayground() {
+  const P = pgState();
+  $$('#view-playground [data-ep]').forEach((b) => b.onclick = () => {
+    try { pgCollect(); pgCollectMsgs(); } catch (e) {}
+    P.endpoint = b.dataset.ep; P.result = null; renderPlayground();
+  });
+  $$('#view-playground [data-msg-role]').forEach((s) => s.onchange = pgCollectMsgs);
+  $$('#view-playground [data-msg-content]').forEach((t) => t.onchange = pgCollectMsgs);
+  $$('#view-playground [data-msg-del]').forEach((b) => b.onclick = () => {
+    try { pgCollect(); pgCollectMsgs(); } catch (e) {}
+    P.msgs.splice(parseInt(b.dataset.msgDel, 10), 1);
+    if (!P.msgs.length) P.msgs.push({ role: 'user', content: '' });
+    renderPlayground();
+  });
+  const addm = $('#pg-addmsg');
+  if (addm) addm.onclick = () => {
+    try { pgCollect(); pgCollectMsgs(); } catch (e) {}
+    P.msgs.push({ role: 'user', content: '' }); renderPlayground();
+  };
+  const st = $('#pg-stream');
+  if (st) st.onclick = (e) => { e.target.classList.toggle('on'); P.stream = e.target.classList.contains('on'); };
+  const nc = $('#pg-f-no_cool');
+  if (nc) nc.onclick = (e) => { e.target.classList.toggle('on'); P.flags.no_cool = e.target.classList.contains('on'); };
+  const rb = $('#pg-rawbtn');
+  if (rb) rb.onclick = () => { try { pgCollect(); pgCollectMsgs(); } catch (e) {} P.rawMode = !P.rawMode; renderPlayground(); };
+  const send = $('#pg-send');
+  if (send) send.onclick = pgSend;
+  const stop = $('#pg-stop2');
+  if (stop) stop.onclick = () => { if (P.abort) P.abort.abort(); };
+  const curl = $('#pg-curl');
+  if (curl) curl.onclick = () => {
+    try {
+      pgCollect(); pgCollectMsgs();
+      const body = pgBuildBody();
+      const s = JSON.stringify(body).replace(/'/g, "'\\''");
+      const cmd = 'curl ' + location.origin + pgEndpointPath(P.endpoint) + ' \\\n  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \\\n  -d \'' + s + "'";
+      navigator.clipboard.writeText(cmd).then(() => toast('cURL copied'));
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  const cp = $('#pg-copy');
+  if (cp) cp.onclick = () => navigator.clipboard.writeText(P.result ? P.result.text : '').then(() => toast('Response copied'));
+}
+
+async function pgSend() {
+  const P = pgState();
+  try { pgCollect(); pgCollectMsgs(); } catch (e) {}
+  let body;
+  try { body = pgBuildBody(); }
+  catch (e) { toast('Bad JSON: ' + e.message, 'err'); return; }
+  if (!body.model) { toast('Pick a model or alias', 'err'); return; }
+  P.reqBody = body;
+  P.abort = new AbortController();
+  const t0 = performance.now();
+  const isStream = P.endpoint === 'chat' && body.stream === true;
+  P.streaming = isStream;
+  P.streamText = '';
+  P.result = null;
+  renderPlayground();
+  try {
+    const r = await fetch(pgEndpointPath(P.endpoint), {
+      method: 'POST', signal: P.abort.signal,
+      headers: { 'Authorization': 'Bearer ' + S.key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.status === 401) { logout(true); return; }
+    const ms = Math.round(performance.now() - t0);
+    const model = r.headers.get('x-llm2-model') || '';
+    if (isStream && r.ok && (r.headers.get('content-type') || '').includes('text/event-stream')) {
+      await pgReadStream(r, P);
+      const done = Math.round(performance.now() - t0);
+      P.result = { ok: true, status: 200, ms: done, model, text: P.streamText };
+      P.history.unshift({ target: body.model, ep: P.endpoint, ms: done, ok: true, status: 200, model });
+    } else {
+      const txt = await r.text();
+      let pretty = txt;
+      try { pretty = JSON.stringify(JSON.parse(txt), null, 2); } catch (e) {}
+      P.result = { ok: r.ok, status: r.status, ms, model, text: pretty };
+      P.history.unshift({ target: body.model, ep: P.endpoint, ms, ok: r.ok, status: r.status, model });
+    }
+  } catch (e) {
+    const ms = Math.round(performance.now() - t0);
+    if (e.name === 'AbortError') {
+      P.result = { ok: false, status: 'STOP', ms, model: '', text: P.streamText || '(stopped)' };
+    } else {
+      P.result = { ok: false, status: 'ERR', ms, model: '', text: String((e && e.message) || e) };
+      P.history.unshift({ target: body.model, ep: P.endpoint, ms, ok: false, status: 0, model: '' });
+    }
+  }
+  P.history = P.history.slice(0, 20);
+  P.streaming = false;
+  P.abort = null;
+  renderPlayground();
+}
+
+async function pgReadStream(r, P) {
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const part = await reader.read();
+    if (part.done) break;
+    buf += dec.decode(part.value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const lines = frame.split('\n');
+      for (let li = 0; li < lines.length; li++) {
+        const t = lines[li].trim();
+        if (t.indexOf('data:') !== 0) continue;
+        const d = t.slice(5).trim();
+        if (d === '[DONE]') continue;
+        try {
+          const j = JSON.parse(d);
+          const ch = j.choices && j.choices[0];
+          const delta = ch && ch.delta;
+          if (delta && typeof delta.content === 'string') {
+            P.streamText += delta.content;
+            const el = $('#pg-out');
+            if (el) { el.textContent = P.streamText; el.scrollTop = el.scrollHeight; }
+          }
+        } catch (e) {}
+      }
+    }
+  }
 }
 
 function openHeadersSheet(key) {

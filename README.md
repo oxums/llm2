@@ -47,6 +47,17 @@ curl $BASE/v1/embeddings ... -d '{"model":"openai/text-embedding-3-small","input
 curl $BASE/v1/decisions ... -d '{"model":"typesafe/jev-latest","state":"...","questions":{"q":{"type":"choice","instructions":"...","criteria":{"a":"...","b":"..."}}}}'
 ```
 
+Success responses carry `X-llm2-model: provider/model` with the model that
+actually served the request (plus `X-Routed-By` with the same value).
+
+## Console UI (`/ui/`)
+
+Login with the API key, then manage providers/aliases or open the
+**Playground**: pick Chat / Embeddings / Decisions, choose any model or alias,
+tune messages, sampling params, and routing flags (or paste raw JSON), stream
+responses live with latency + `X-llm2-model` shown, keep a run history, and
+copy any run as cURL.
+
 Per-request flags (body field **or** `x-` header — **header wins**, always
 stripped before upstream):
 

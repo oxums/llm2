@@ -46,6 +46,16 @@ fn record(st: &Shared, t0: Instant, ok: bool, usage: Option<&Value>) {
     }
 }
 
+/// Tag a success response with the actually-chosen model (`provider/model`).
+fn with_chosen(r: axum::response::Response, routed: &str) -> axum::response::Response {
+    let mut r = r;
+    if let Ok(v) = routed.parse::<axum::http::HeaderValue>() {
+        r.headers_mut().insert("x-llm2-model", v.clone());
+        r.headers_mut().insert("x-routed-by", v);
+    }
+    r
+}
+
 // ---------------------------------------------------------------- /v1/models
 
 pub async fn models(State(st): State<Shared>, headers: HeaderMap, q: axum::extract::Query<HashMap<String, String>>) -> impl axum::response::IntoResponse {
@@ -309,25 +319,17 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                         record(&st, t0, true, None);
                         let mut r = body_stream.into_response();
                         *r.status_mut() = StatusCode::OK;
-                        let h = r.headers_mut();
-                        h.insert("content-type", "text/event-stream".parse().unwrap());
-                        h.insert("cache-control", "no-cache".parse().unwrap());
-                        if let Ok(v) = routed.parse::<axum::http::HeaderValue>() {
-                            h.insert("x-routed-by", v);
-                        }
-                        return r;
+                        r.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
+                        r.headers_mut().insert("cache-control", "no-cache".parse().unwrap());
+                        return with_chosen(r, &routed);
                     } else if kind == TranslatedKind::None {
                         let bytes = resp.bytes().await.unwrap_or_default();
                         let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
                         record(&st, t0, true, usage.as_ref());
                         let mut r = Body::from(bytes).into_response();
                         *r.status_mut() = StatusCode::OK;
-                        let h = r.headers_mut();
-                        h.insert("content-type", "application/json".parse().unwrap());
-                        if let Ok(v) = routed.parse::<axum::http::HeaderValue>() {
-                            h.insert("x-routed-by", v);
-                        }
-                        return r;
+                        r.headers_mut().insert("content-type", "application/json".parse().unwrap());
+                        return with_chosen(r, &routed);
                     } else {
                         let v: Value = resp.json().await.unwrap_or(Value::Null);
                         let out = if kind == TranslatedKind::Anthropic {
@@ -338,11 +340,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                         let usage = out.get("usage").cloned();
                         record(&st, t0, true, usage.as_ref());
                         let _ = routed_alias;
-                        let mut r = Json(out).into_response();
-                        if let Ok(v) = routed.parse::<axum::http::HeaderValue>() {
-                            r.headers_mut().insert("x-routed-by", v);
-                        }
-                        return r;
+                        return with_chosen(Json(out).into_response(), &routed);
                     }
                 }
             }
@@ -513,10 +511,11 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
                 if (200..300).contains(&s) {
                     let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("usage").cloned());
                     record(&st, t0, true, usage.as_ref());
+                    let routed = format!("{}/{}", c.provider, c.model);
                     let mut r = Body::from(bytes).into_response();
                     *r.status_mut() = StatusCode::OK;
                     r.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                    return r;
+                    return with_chosen(r, &routed);
                 }
                 let txt = String::from_utf8_lossy(&bytes).to_string();
                 if providers::is_retryable(s) {
@@ -650,8 +649,9 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
         match providers::send_decision(&st.http, source, slug, &state_val, &questions, tcfg.as_ref(), ocfg.as_ref(), provider_prefs.as_ref(), 30000).await {
             Ok(mut v) => {
                 record(&st, t0, true, None);
-                v["proxy"] = serde_json::json!({"via": format!("{source}/{slug}")});
-                return (StatusCode::OK, Json(v)).into_response();
+                let via = format!("{source}/{slug}");
+                v["proxy"] = serde_json::json!({"via": via});
+                return with_chosen((StatusCode::OK, Json(v)).into_response(), &via);
             }
             Err((s, e)) => {
                 if providers::is_retryable(s) || s == 504 {
