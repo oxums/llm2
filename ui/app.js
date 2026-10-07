@@ -506,7 +506,7 @@ function pmBody(a, kind) {
       '<div><label class="lbl">Fallback</label><select id="c-fb" class="inp code"><option value="">(head of order)</option>' +
       members.map((m) => '<option' + (m === c.fallback ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select></div>' +
       '<div><label class="lbl">Prompt</label><textarea id="c-prompt" class="inp">' + esc(c.prompt || 'Which model should handle this request?') + '</textarea>' +
-      '<p class="text-[11.5px] text-zinc-600 mt-1">Edit the single options description in their settings.</p></div>' +
+      '<p class="text-[11.5px] text-zinc-600 mt-1">Edit the single options description in their settings. Last user message (800 chars) is auto-appended as USER MESSAGE.</p></div>' +
       '<div><label class="lbl">Min confidence <span id="c-conf-v" class="code text-zinc-300">' + esc(String(c.min_confidence != null ? c.min_confidence : 0.5)) + '</span></label>' +
       '<input id="c-conf" type="range" min="0" max="1" step="0.05" value="' + esc(String(c.min_confidence != null ? c.min_confidence : 0.5)) + '" class="w-full"></div>' +
       '</div>';
@@ -571,12 +571,18 @@ function pgState() {
     msgs: [{ role: 'user', content: 'Hello! Who are you?' }],
     temperature: '0.7', max_tokens: '', top_p: '', freq: '', pres: '',
     stop: '', stream: true, resp_format: 'none', rawMode: false, raw: '',
+    think_level: '', think_budget: '', think_thoughts: true,
     emb_input: 'Hello world', emb_dim: '', emb_enc: 'float',
     dec_state: 'My checkout page shows a blank screen after I click Pay.',
     dec_questions: '{\n  "team": {\n    "type": "choice",\n    "instructions": "Which team should own this ticket?",\n    "criteria": {\n      "payments": "Checkout, billing, or payment issues",\n      "frontend": "Rendering, layout, or browser issues",\n      "account": "Login, permissions, or profile issues"\n    }\n  }\n}',
     flags: { ignore: '', prefer: '', only_p: '', only_m: '', any_pref: '', no_cool: true },
-    result: null, history: [], streaming: false, abort: null, reqBody: null, streamText: '',
+    result: null, history: [], streaming: false, abort: null, reqBody: null, streamText: '', streamThinking: '',
   };
+  // migrate older in-memory state
+  if (S.pg.think_level === undefined) S.pg.think_level = '';
+  if (S.pg.think_budget === undefined) S.pg.think_budget = '';
+  if (S.pg.think_thoughts === undefined) S.pg.think_thoughts = true;
+  if (S.pg.streamThinking === undefined) S.pg.streamThinking = '';
   return S.pg;
 }
 function pgTargets(ep) {
@@ -624,6 +630,14 @@ function renderPlayground() {
       '<div><label class="lbl">response_format</label><select id="pg-rf" class="inp">' +
       ['none', 'json_object'].map((o) => '<option' + (P.resp_format === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select></div>' +
       '<div class="flex items-center gap-2.5 pt-6"><div class="switch' + (P.stream ? ' on' : '') + '" id="pg-stream"></div><span class="text-[13px]">Stream</span></div>' +
+      '</div>' +
+      '<div><label class="lbl">Thinking <span class="text-zinc-600">(Google · summaries on by default)</span></label>' +
+      '<div class="grid grid-cols-2 gap-2">' +
+      '<div><label class="lbl">thinking_level</label><select id="pg-think-level" class="inp code">' +
+      [['', 'default (auto)'], ['minimal', 'minimal'], ['low', 'low'], ['medium', 'medium'], ['high', 'high']].map((o) => '<option value="' + o[0] + '"' + ((P.think_level || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></div>' +
+      '<div><label class="lbl">thinking_budget</label><input id="pg-think-budget" class="inp code" placeholder="auto" value="' + esc(P.think_budget || '') + '"></div>' +
+      '</div>' +
+      '<div class="flex items-center gap-2.5 mt-2"><div class="switch' + (P.think_thoughts === false ? '' : ' on') + '" id="pg-think-thoughts"></div><span class="text-[12.5px]">Thought summaries <span class="text-zinc-600">(off sends disable_thinking_summaries)</span></span></div>' +
       '</div>';
   } else if (P.endpoint === 'chat' && P.rawMode) {
     form = '<div><label class="lbl">Raw JSON body <span class="text-zinc-600">(sent as-is, plus flags)</span></label>' +
@@ -670,7 +684,7 @@ function renderPlayground() {
     '</div></div>' +
     '<div class="space-y-3.5"><div class="card"><div class="card-h"><div class="card-t">Response</div><div class="card-d" id="pg-meta">' + pgMeta(P.result) + '</div></div>' +
     '<div class="card-p"><pre id="pg-out" class="code text-[12px] leading-relaxed bg-[#0c0c0e] border border-[#232329] rounded-[10px] p-4 overflow-auto max-h-[520px] whitespace-pre-wrap break-words text-zinc-300">' +
-    (P.streaming ? esc(P.streamText || '') + '<span class="animate-pulse">▍</span>' : P.result ? esc(P.result.text) : '—') + '</pre>' +
+    (P.streaming ? esc(pgStreamView(P)) + '<span class="animate-pulse">▍</span>' : P.result ? esc(P.result.text) : '—') + '</pre>' +
     (P.result ? '<div class="flex gap-2 mt-3"><button id="pg-copy" class="btn btn-sec !text-[12px]">Copy response</button></div>' : '') +
     '</div></div>' +
     '<div class="card"><div class="card-h"><div class="card-t">History</div><div class="card-d">last runs this session</div></div>' +
@@ -693,6 +707,13 @@ function pgMeta(r) {
   if (r.model) parts.push('<span class="badge b-blue">' + esc(r.model) + '</span>');
   return '<span class="flex items-center gap-1.5 flex-wrap">' + parts.join('') + '</span>';
 }
+/* combined live view: thinking summaries first (progress), then answer */
+function pgStreamView(P) {
+  const th = P.streamThinking || '', tx = P.streamText || '';
+  if (th && tx) return '💭 thinking…\n' + th + '\n\n───\n' + tx;
+  if (th) return '💭 thinking…\n' + th;
+  return tx;
+}
 function pgHistory() {  const H = pgState().history;
   if (!H.length) return '<div class="py-4 text-center text-[12.5px] text-zinc-600">No runs yet.</div>';
   return H.map((h) =>
@@ -712,6 +733,8 @@ function pgCollect() {
     P.top_p = $('#pg-top_p').value; P.freq = $('#pg-frequency_penalty').value;
     P.pres = $('#pg-presence_penalty').value; P.stop = $('#pg-stop').value;
     P.resp_format = $('#pg-rf').value;
+    if ($('#pg-think-level')) P.think_level = $('#pg-think-level').value;
+    if ($('#pg-think-budget')) P.think_budget = $('#pg-think-budget').value;
   } else if (P.endpoint === 'chat' && P.rawMode) {
     P.raw = $('#pg-raw').value;
   } else if (P.endpoint === 'embeddings') {
@@ -758,6 +781,14 @@ function pgBuildBody() {
     if (P.stop.trim()) b.stop = csv(P.stop);
     if (P.resp_format === 'json_object') b.response_format = { type: 'json_object' };
     if (P.stream) b.stream = true;
+    // thinking config (Google; stripped for other upstreams). Summaries are
+    // ON by default server-side — only send the opt-out when toggled off.
+    if ((P.think_level || '').trim()) b.thinking_level = P.think_level.trim().toLowerCase();
+    {
+      const tb = numOrUndef(P.think_budget);
+      if (tb !== undefined) b.thinking_budget = Math.round(tb);
+    }
+    if (P.think_thoughts === false) b.disable_thinking_summaries = true;
     return b;
   }
   if (P.endpoint === 'embeddings') {
@@ -794,6 +825,12 @@ function wirePlayground() {
   if (st) st.onclick = (e) => { e.target.classList.toggle('on'); P.stream = e.target.classList.contains('on'); };
   const nc = $('#pg-f-no_cool');
   if (nc) nc.onclick = (e) => { e.target.classList.toggle('on'); P.flags.no_cool = e.target.classList.contains('on'); };
+  const th = $('#pg-think-thoughts');
+  if (th) th.onclick = (e) => { e.target.classList.toggle('on'); P.think_thoughts = e.target.classList.contains('on'); };
+  const tl = $('#pg-think-level');
+  if (tl) tl.onchange = (e) => { P.think_level = e.target.value; };
+  const tb = $('#pg-think-budget');
+  if (tb) tb.onchange = (e) => { P.think_budget = e.target.value; };
   const rb = $('#pg-rawbtn');
   if (rb) rb.onclick = () => { try { pgCollect(); pgCollectMsgs(); } catch (e) {} P.rawMode = !P.rawMode; renderPlayground(); };
   const send = $('#pg-send');
@@ -827,6 +864,7 @@ async function pgSend() {
   const isStream = P.endpoint === 'chat' && body.stream === true;
   P.streaming = isStream;
   P.streamText = '';
+  P.streamThinking = '';
   P.result = null;
   renderPlayground();
   try {
@@ -841,7 +879,7 @@ async function pgSend() {
     if (isStream && r.ok && (r.headers.get('content-type') || '').includes('text/event-stream')) {
       await pgReadStream(r, P);
       const done = Math.round(performance.now() - t0);
-      P.result = { ok: true, status: 200, ms: done, model, text: P.streamText };
+      P.result = { ok: true, status: 200, ms: done, model, text: pgStreamView(P) };
       P.history.unshift({ target: body.model, ep: P.endpoint, ms: done, ok: true, status: 200, model });
     } else {
       const txt = await r.text();
@@ -853,7 +891,7 @@ async function pgSend() {
   } catch (e) {
     const ms = Math.round(performance.now() - t0);
     if (e.name === 'AbortError') {
-      P.result = { ok: false, status: 'STOP', ms, model: '', text: P.streamText || '(stopped)' };
+      P.result = { ok: false, status: 'STOP', ms, model: '', text: pgStreamView(P) || '(stopped)' };
     } else {
       P.result = { ok: false, status: 'ERR', ms, model: '', text: String((e && e.message) || e) };
       P.history.unshift({ target: body.model, ep: P.endpoint, ms, ok: false, status: 0, model: '' });
@@ -887,10 +925,23 @@ async function pgReadStream(r, P) {
           const j = JSON.parse(d);
           const ch = j.choices && j.choices[0];
           const delta = ch && ch.delta;
-          if (delta && typeof delta.content === 'string') {
+          let touched = false;
+          if (delta && typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+            P.streamThinking += delta.reasoning_content;
+            touched = true;
+          }
+          if (delta && typeof delta.content === 'string' && delta.content) {
             P.streamText += delta.content;
+            touched = true;
+          }
+          // some providers use `reasoning` instead of `reasoning_content`
+          if (delta && typeof delta.reasoning === 'string' && delta.reasoning) {
+            P.streamThinking += delta.reasoning;
+            touched = true;
+          }
+          if (touched) {
             const el = $('#pg-out');
-            if (el) { el.textContent = P.streamText; el.scrollTop = el.scrollHeight; }
+            if (el) { el.textContent = pgStreamView(P); el.scrollTop = el.scrollHeight; }
           }
         } catch (e) {}
       }

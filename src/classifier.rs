@@ -47,6 +47,61 @@ pub fn messages_to_state(body: &Value, max_chars: usize) -> Value {
     Value::String(s)
 }
 
+/// Plain text of a single message content (multimodal -> placeholders).
+fn content_text(c: &Value) -> String {
+    match c {
+        Value::String(s) => s.clone(),
+        Value::Array(ps) => ps
+            .iter()
+            .map(|p| match p.get("type").and_then(|x| x.as_str()) {
+                Some("text") => p.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                Some("image_url") => "[image attached]".to_string(),
+                Some("input_audio") | Some("audio_url") => "[audio attached]".to_string(),
+                Some("video_url") => "[video attached]".to_string(),
+                Some("file") => "[file attached]".to_string(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
+/// Last user message only, capped at `max_chars` (char-boundary).
+/// Empty when no non-empty user message exists.
+pub fn last_user_message(body: &Value, max_chars: usize) -> String {
+    if let Some(ms) = body.get("messages").and_then(|m| m.as_array()) {
+        for m in ms.iter().rev() {
+            if m.get("role").and_then(|r| r.as_str()) != Some("user") {
+                continue;
+            }
+            let t = content_text(m.get("content").unwrap_or(&Value::Null));
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            return truncate_chars(t, max_chars);
+        }
+    }
+    String::new()
+}
+
+/// Classifier prompt with the request appended: "<prompt>\n\nUSER MESSAGE: <last>".
+/// When there is no user message the base prompt is returned unchanged.
+pub fn prompt_with_user_message(base_prompt: &str, user_msg: &str) -> String {
+    let base = base_prompt.trim_end();
+    if user_msg.trim().is_empty() {
+        return base.to_string();
+    }
+    format!("{base}\n\nUSER MESSAGE: {}", user_msg.trim())
+}
 /// Sanitize a member key for use as a Choice option key (Clef rejects '/').
 pub fn sanitize_key(member_key: &str) -> String {
     member_key.replace(['/', ':', ' '], "__")
@@ -126,10 +181,18 @@ async fn classify_jev(
     body: &Value,
 ) -> Option<(usize, f64, String)> {
     let (criteria, keys) = criteria_for(cands, alias);
+    // Route on the actual request: last user message only (800 chars),
+    // appended to the prompt so the judge sees it in context.
+    let user_msg = last_user_message(body, 800);
+    let instructions = prompt_with_user_message(&alias.classifier.prompt, &user_msg);
     let questions = serde_json::json!({
-        "route": {"type": "choice", "instructions": alias.classifier.prompt, "criteria": criteria}
+        "route": {"type": "choice", "instructions": instructions, "criteria": criteria}
     });
-    let state_val = messages_to_state(body, 8000);
+    let state_val = if user_msg.is_empty() {
+        messages_to_state(body, 800)
+    } else {
+        Value::String(user_msg)
+    };
     // resolve decision source: "typesafe/slug..." or "openrouter/slug..."
     let (source, slug) = resolve_decision_model(&alias.classifier.model)?;
     let cfg = st.config.read().await;
@@ -188,16 +251,27 @@ async fn classify_text(
         let d = criteria.get(&sanitize_key(&member)).and_then(|v| v.as_str()).unwrap_or("");
         format!("{i}: {member} — {d}")
     }).collect::<Vec<_>>().join("\n");
-    let sys = format!("{}. Valid options:\n{}\n\nReply with a single JSON object {{\"pick\": <index>}} and nothing else.", alias.classifier.prompt, options_txt);
+    // Same request focus as the jev backend: last user message (800 chars)
+    // appended to the system prompt as USER MESSAGE.
+    let user_msg = last_user_message(body, 800);
+    let base_sys = format!("{}. Valid options:\n{}\n\nReply with a single JSON object {{\"pick\": <index>}} and nothing else.", alias.classifier.prompt, options_txt);
+    let sys = prompt_with_user_message(&base_sys, &user_msg);
+    let user_content = if user_msg.is_empty() {
+        messages_to_state(body, 800)
+    } else {
+        Value::String(user_msg)
+    };
     let jb = serde_json::json!({
         "model": jm,
         "messages": [
             {"role": "system", "content": sys},
-            {"role": "user", "content": messages_to_state(body, 4000)}
+            {"role": "user", "content": user_content}
         ],
         "temperature": 0.0,
         "max_tokens": 64,
-        "response_format": {"type": "json_object"}
+        "response_format": {"type": "json_object"},
+        // judge needs the answer only — skip thought summaries (latency + tokens)
+        "disable_thinking_summaries": true
     });
     // strip our flags just in case
     let disp = providers::build_chat(&st.http, &jp, &pcfg, &jm, jb, &Default::default(), &serde_json::json!({})).ok()?;

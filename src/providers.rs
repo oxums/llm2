@@ -79,6 +79,25 @@ fn apply_headers(b: reqwest::RequestBuilder, extra: &HashMap<String, String>) ->
     b
 }
 
+/// Remove our Google-thinking helper keys so OpenAI-compatible / Azure
+/// upstreams don't see unknown fields (reasoning_effort stays: it's native).
+fn strip_thinking(body: &mut serde_json::Value) {
+    if let Some(o) = body.as_object_mut() {
+        for k in [
+            "disable_thinking_summaries",
+            "thinking_level",
+            "thinkingLevel",
+            "thinking_budget",
+            "thinkingBudget",
+            "include_thoughts",
+            "thinking_config",
+            "thinkingConfig",
+        ] {
+            o.remove(k);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- chat send
 
 pub struct ChatDispatch {
@@ -108,6 +127,11 @@ pub fn build_chat(
     body = merge_body(body, extra_body);
     body["model"] = serde_json::Value::String(upstream_model.to_string());
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    // Google-thinking helpers must not leak to OpenAI-compatible / Azure upstreams.
+    // (anthropic/google translators build a fresh object and ignore them anyway.)
+    if !matches!(provider, "anthropic" | "google") {
+        strip_thinking(&mut body);
+    }
 
     match provider {
         "anthropic" => {
@@ -522,6 +546,63 @@ fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) ->
             }
         }
     }
+    // ---- thinking summaries: ON by default, off with disable_thinking_summaries ----
+    // OpenAI-style knobs (all optional, stripped before upstream for non-Google):
+    //   disable_thinking_summaries: bool (default false)
+    //   include_thoughts: bool (explicit override; disable flag wins)
+    //   thinking_level | thinkingLevel | reasoning_effort: minimal|low|medium|high
+    //   thinking_budget | thinkingBudget: int (Gemini 2.5 style; exclusive with level)
+    //   thinking_config | thinkingConfig: object (raw merge, explicit knobs win)
+    {
+        let disabled = body
+            .get("disable_thinking_summaries")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let explicit_include = body.get("include_thoughts").and_then(|v| v.as_bool());
+        let raw: Option<serde_json::Map<String, serde_json::Value>> = body
+            .get("thinking_config")
+            .or_else(|| body.get("thinkingConfig"))
+            .and_then(|v| v.as_object())
+            .cloned();
+        let level: Option<String> = body
+            .get("thinking_level")
+            .or_else(|| body.get("thinkingLevel"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                body.get("reasoning_effort")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+        let budget: Option<u64> = body
+            .get("thinking_budget")
+            .or_else(|| body.get("thinkingBudget"))
+            .and_then(|v| v.as_u64());
+        let mut tc = raw.unwrap_or_default();
+        if disabled {
+            tc.insert("includeThoughts".to_string(), serde_json::json!(false));
+        } else if !tc.contains_key("includeThoughts") {
+            tc.insert(
+                "includeThoughts".to_string(),
+                serde_json::json!(explicit_include.unwrap_or(true)),
+            );
+        }
+        if let Some(l) = level {
+            let norm = l.trim().to_lowercase();
+            tc.insert("thinkingLevel".to_string(), serde_json::json!(norm));
+            // level and budget are mutually exclusive — level wins
+            tc.remove("thinkingBudget");
+        } else if let Some(b) = budget {
+            tc.insert("thinkingBudget".to_string(), serde_json::json!(b));
+            tc.remove("thinkingLevel");
+        }
+        // omit when trivially disabled (default is off anyway) to keep payload minimal
+        let trivial_off =
+            tc.len() == 1 && tc.get("includeThoughts") == Some(&serde_json::json!(false));
+        if !tc.is_empty() && !trivial_off {
+            gen.insert("thinkingConfig".to_string(), serde_json::Value::Object(tc));
+        }
+    }
     if !gen.is_empty() {
         out["generationConfig"] = serde_json::Value::Object(gen);
     }
@@ -577,11 +658,17 @@ fn google_finish(r: &str) -> &'static str {
 pub fn from_google(resp: &serde_json::Value, req_model: &str) -> serde_json::Value {
     let cand = resp.get("candidates").and_then(|c| c.as_array()).and_then(|a| a.first()).cloned().unwrap_or(serde_json::Value::Null);
     let mut text = String::new();
+    let mut thought = String::new();
     let mut tool_calls = vec![];
     if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
         for p in parts {
+            let is_thought = p.get("thought").and_then(|x| x.as_bool()).unwrap_or(false);
             if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
-                text.push_str(t);
+                if is_thought {
+                    thought.push_str(t);
+                } else {
+                    text.push_str(t);
+                }
             }
             if let Some(fc) = p.get("functionCall") {
                 tool_calls.push(serde_json::json!({
@@ -595,8 +682,14 @@ pub fn from_google(resp: &serde_json::Value, req_model: &str) -> serde_json::Val
     let finish = google_finish(cand.get("finishReason").and_then(|x| x.as_str()).unwrap_or("STOP"));
     let um = resp.get("usageMetadata");
     let pt = um.and_then(|u| u.get("promptTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
-    let ct = um.and_then(|u| u.get("candidatesTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
+    let ct_cand = um.and_then(|u| u.get("candidatesTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
+    // thought tokens are billed — count them as completion like reasoning tokens
+    let ct_thought = um.and_then(|u| u.get("thoughtsTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
+    let ct = ct_cand + ct_thought;
     let mut msg = serde_json::json!({"role": "assistant", "content": text});
+    if !thought.is_empty() {
+        msg["reasoning_content"] = serde_json::Value::String(thought);
+    }
     if !tool_calls.is_empty() {
         msg["tool_calls"] = serde_json::Value::Array(tool_calls);
     }
@@ -797,9 +890,15 @@ impl StreamXlat {
         }
         if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
             for p in parts {
+                let is_thought = p.get("thought").and_then(|x| x.as_bool()).unwrap_or(false);
                 if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
                     if !t.is_empty() {
-                        out.push(self.chunk(serde_json::json!({"content": t}), None));
+                        if is_thought {
+                            // thought summaries stream as reasoning deltas (progress)
+                            out.push(self.chunk(serde_json::json!({"reasoning_content": t}), None));
+                        } else {
+                            out.push(self.chunk(serde_json::json!({"content": t}), None));
+                        }
                     }
                 }
                 if let Some(fc) = p.get("functionCall") {
@@ -814,8 +913,10 @@ impl StreamXlat {
         if let Some(um) = v.get("usageMetadata") {
             self.usage_in = um.get("promptTokenCount").and_then(|x| x.as_u64()).unwrap_or(self.usage_in);
             let c = um.get("candidatesTokenCount").and_then(|x| x.as_u64()).unwrap_or(0);
-            if c > 0 {
-                self.usage_out = c;
+            let th = um.get("thoughtsTokenCount").and_then(|x| x.as_u64()).unwrap_or(0);
+            let tot = c + th;
+            if tot > 0 {
+                self.usage_out = tot;
             }
         }
         if let Some(fr) = cand.get("finishReason").and_then(|x| x.as_str()) {
