@@ -1,0 +1,50 @@
+{
+  "server": { "host": "0.0.0.0", "port": 3000, "api_key": "" },
+  "providers": {
+    "openai": { "api_key": "", "base_url": null, "extra_headers": {}, "enabled_models": null, "api_version": null },
+    "anthropic": { "api_key": "", "base_url": null, "extra_headers": {}, "enabled_models": null, "api_version": null },
+    "google": { "api_key": "", "base_url": null, "extra_headers": {}, "enabled_models": null, "api_version": null },
+    "groq": { "api_key": "", "base_url": null, "extra_headers": {}, "enabled_models": null, "api_version": null },
+    "openrouter": {
+      "api_key": "",
+      "base_url": null,
+      "extra_headers": { "HTTP-Referer": "https://localhost:3000", "X-Title": "llm-proxy" },
+      "enabled_models": null,
+      "api_version": null
+    },
+    "typesafe": { "api_key": "", "base_url": null, "extra_headers": {}, "enabled_models": null, "api_version": null }
+  },
+  "aliases": {
+    "fast": {
+      "models": {
+        "openai/gpt-4o-mini": {
+          "enabled": true,
+          "extra_headers": {},
+          "extra_body": { "service_tier": "fast" },
+          "capabilities_override": {},
+          "option_description": "Cheap fast generalist. Good for simple QA and chat.",
+          "embed_dimensions": null
+        },
+        "groq/groq-compound-mini": {
+          "enabled": true,
+          "extra_headers": {},
+          "extra_body": null,
+          "capabilities_override": {},
+          "option_description": "Fast compound model with tool use. Good for agents.",
+          "embed_dimensions": null
+        }
+      },
+      "pick_mode": "failover",
+      "order": ["openai/gpt-4o-mini", "groq/groq-compound-mini"],
+      "capabilities_spoof": { "image": "auto", "audio": "auto", "video": "auto", "pdf": "auto" },
+      "classifier": {
+        "backend": "jev",
+        "model": "typesafe/jev-latest",
+        "fallback": "openai/gpt-4o-mini",
+        "prompt": "Which model should handle this request?",
+        "min_confidence": 0.5,
+        "timeout_ms": 15000
+      }
+    }
+  }
+}

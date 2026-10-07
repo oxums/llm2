@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Proxy — console</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: {
+    fontFamily: { sans: ['Inter','ui-sans-serif','system-ui','sans-serif'], mono: ['JetBrains Mono','ui-monospace','monospace'] },
+    colors: { ink: {950:'#09090b',900:'#0e0e11',850:'#131316',800:'#1a1a1f',700:'#26262c',600:'#3a3a42'} },
+    borderRadius: { xl2: '14px' },
+    boxShadow: { card: '0 1px 0 0 rgba(255,255,255,.04) inset, 0 8px 24px -12px rgba(0,0,0,.6)' }
+  }}
+};
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  html,body{height:100%}
+  body{background:#09090b}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2a2a31;border-radius:8px;border:2px solid #09090b}
+  ::-webkit-scrollbar-track{background:transparent}
+  .card{background:#131316;border:1px solid #232329;border-radius:14px;box-shadow:0 1px 0 0 rgba(255,255,255,.04) inset,0 8px 24px -12px rgba(0,0,0,.6)}
+  .card-h{padding:18px 20px 0 20px}
+  .card-t{font-size:14px;font-weight:600;color:#fafafa}
+  .card-d{font-size:12.5px;color:#8e8e96;margin-top:2px}
+  .card-p{padding:16px 20px 20px 20px}
+  .btn{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:500;border-radius:9px;padding:7px 13px;border:1px solid transparent;transition:.15s;cursor:pointer}
+  .btn-pri{background:#fafafa;color:#09090b}.btn-pri:hover{background:#e4e4e7}
+  .btn-sec{background:#1c1c21;color:#e4e4e7;border-color:#2e2e35}.btn-sec:hover{background:#26262c}
+  .btn-ghost{color:#a1a1aa}.btn-ghost:hover{background:#1c1c21;color:#fafafa}
+  .btn-danger{background:rgba(244,63,94,.12);color:#fda4af;border-color:rgba(244,63,94,.25)}.btn-danger:hover{background:rgba(244,63,94,.2)}
+  .inp{background:#0e0e11;border:1px solid #2a2a31;border-radius:9px;font-size:13px;color:#fafafa;padding:8px 11px;width:100%;outline:none}
+  .inp:focus{border-color:#52525b}
+  .inp::placeholder{color:#52525b}
+  select.inp option{background:#131316}
+  textarea.inp{resize:vertical;min-height:70px;font-family:inherit}
+  .lbl{font-size:12px;font-weight:500;color:#a1a1aa;margin-bottom:5px;display:block}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;border-radius:999px;padding:2.5px 9px;border:1px solid #2e2e35;background:#1c1c21;color:#d4d4d8;white-space:nowrap}
+  .badge .dot{width:6px;height:6px;border-radius:99px;background:#71717a}
+  .b-green{color:#6ee7b7;border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.08)}.b-green .dot{background:#34d399}
+  .b-blue{color:#93c5fd;border-color:rgba(96,165,250,.3);background:rgba(96,165,250,.08)}.b-blue .dot{background:#60a5fa}
+  .b-amber{color:#fcd34d;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.08)}.b-amber .dot{background:#fbbf24}
+  .b-violet{color:#c4b5fd;border-color:rgba(167,139,250,.3);background:rgba(167,139,250,.08)}.b-violet .dot{background:#a78bfa}
+  .b-rose{color:#fda4af;border-color:rgba(251,113,133,.3);background:rgba(251,113,133,.08)}.b-rose .dot{background:#fb7185}
+  .b-zinc{color:#a1a1aa}
+  .tab{font-size:13px;font-weight:500;color:#8e8e96;padding:7px 14px;border-radius:9px;cursor:pointer;border:1px solid transparent;white-space:nowrap}
+  .tab:hover{color:#e4e4e7}
+  .tab.on{background:#232329;color:#fafafa;border-color:#33333b}
+  .navit{display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:500;color:#8e8e96;padding:8px 12px;border-radius:9px;cursor:pointer;width:100%;text-align:left}
+  .navit:hover{color:#fafafa;background:#131316}
+  .navit.on{color:#fafafa;background:#1a1a1f}
+  .navit svg{width:16px;height:16px;flex:none}
+  .kv-row{display:flex;gap:8px;margin-bottom:8px}
+  input[type=range]{accent-color:#fafafa}
+  .switch{position:relative;width:34px;height:20px;background:#2a2a31;border-radius:99px;cursor:pointer;transition:.15s;flex:none}
+  .switch:after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:99px;background:#71717a;transition:.15s}
+  .switch.on{background:rgba(52,211,153,.35)}.switch.on:after{left:16px;background:#34d399}
+  .sheet{position:fixed;top:0;right:0;bottom:0;width:min(480px,100vw);background:#101013;border-left:1px solid #26262c;z-index:60;transform:translateX(100%);transition:transform .22s ease;display:flex;flex-direction:column}
+  .sheet.open{transform:none}
+  #backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:55;opacity:0;pointer-events:none;transition:.2s}
+  #backdrop.open{opacity:1;pointer-events:auto}
+  .toast{background:#18181b;border:1px solid #2e2e35;border-radius:10px;padding:10px 14px;font-size:13px;color:#e4e4e7;box-shadow:0 8px 30px rgba(0,0,0,.5);animation:tin .2s ease}
+  @keyframes tin{from{transform:translateY(8px);opacity:0}}
+  .skel{background:linear-gradient(90deg,#1a1a1f 25%,#232329 50%,#1a1a1f 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:8px}
+  @keyframes sk{to{background-position:-200% 0}}
+  .code{font-family:'JetBrains Mono',monospace;font-size:12px}
+  .pill{font-size:13px;font-weight:500;padding:8px 18px;border-radius:10px;cursor:pointer;color:#8e8e96;border:1px solid transparent;white-space:nowrap}
+  .pill:hover{color:#e4e4e7}
+  .pill.on{background:#26262c;color:#fafafa;border-color:#34343c}
+  details.set{border:1px solid #26262c;border-radius:10px;background:#0e0e11}
+  details.set summary{cursor:pointer;list-style:none}
+  details.set summary::-webkit-details-marker{display:none}
+</style>
+</head>
+<body class="text-zinc-100 antialiased">
+
+<!-- ============ LOGIN ============ -->
+<div id="login" class="hidden min-h-screen items-center justify-center px-4">
+  <div class="card w-full max-w-sm">
+    <div class="card-h"><div class="card-t text-base">LLM Proxy</div>
+      <div class="card-d">Enter your API key to open the console. The same key authorizes proxy requests.</div></div>
+    <div class="card-p space-y-3">
+      <div><label class="lbl">API key</label>
+        <input id="login-key" type="password" class="inp code" placeholder="admin" autocomplete="current-password"></div>
+      <div id="login-err" class="hidden text-[12.5px] text-rose-400"></div>
+      <button id="login-btn" class="btn btn-pri w-full justify-center">Sign in</button>
+      <p class="text-[11.5px] text-zinc-600">Default key is <span class="code text-zinc-500">admin</span> — change it via <span class="code text-zinc-500">API_KEY</span> env or server config.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app" class="hidden min-h-screen">
+  <div class="flex min-h-screen">
+    <!-- sidebar -->
+    <aside class="w-[228px] flex-none border-r border-[#1b1b20] bg-[#0c0c0e] flex flex-col min-h-screen sticky top-0 h-screen">
+      <div class="px-4 pt-5 pb-4 flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-[10px] bg-gradient-to-br from-emerald-400 to-sky-500 flex items-center justify-center text-[15px] font-bold text-zinc-950">◈</div>
+        <div><div class="text-[13.5px] font-semibold leading-tight">LLM Proxy</div>
+        <div id="sb-env" class="text-[11px] text-zinc-500 leading-tight">console</div></div>
+      </div>
+      <nav class="px-2.5 space-y-0.5 mt-1">
+        <button class="navit" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Overview</button>
+        <button class="navit" data-view="providers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19"/><circle cx="12" cy="12" r="3.2"/></svg>Providers</button>
+        <button class="navit" data-view="aliases"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.3"/><circle cx="3.5" cy="12" r="1.3"/><circle cx="3.5" cy="18" r="1.3"/></svg>Aliases</button>
+      </nav>
+      <div class="mt-auto p-3 space-y-2">
+        <div class="card !rounded-xl"><div class="p-3.5">
+          <div class="text-[12.5px] font-semibold">Proxy endpoint</div>
+          <div class="code text-[11px] text-zinc-500 mt-1 break-all" id="sb-base">/v1</div>
+          <button id="btn-copy-base" class="btn btn-sec w-full justify-center mt-2.5 !text-[12px]">Copy base URL</button>
+        </div></div>
+        <button id="btn-logout" class="navit !text-zinc-600"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>Sign out</button>
+      </div>
+    </aside>
+
+    <!-- main -->
+    <main class="flex-1 min-w-0 px-8 py-7 max-w-[1180px]">
+      <div class="flex items-center gap-3 mb-6">
+        <h1 id="view-title" class="text-[19px] font-semibold tracking-tight">Overview</h1>
+        <span id="live-dot" class="badge b-green"><span class="dot"></span>live</span>
+        <div class="ml-auto flex items-center gap-2">
+          <button id="btn-reload" class="btn btn-sec">↻ Refresh catalog</button>
+        </div>
+      </div>
+      <section id="view-overview"></section>
+      <section id="view-providers" class="hidden"></section>
+      <section id="view-aliases" class="hidden"></section>
+      <p class="text-[11.5px] text-zinc-600 mt-10">OpenAI-compatible · <span class="code">POST /v1/chat/completions</span> · <span class="code">POST /v1/embeddings</span> · Decisions: <span class="code">POST /v1/decisions</span></p>
+    </main>
+  </div>
+</div>
+
+<!-- sheet + backdrop + toasts -->
+<div id="backdrop"></div>
+<aside id="sheet" class="sheet" aria-hidden="true">
+  <div class="flex items-center gap-2 px-5 py-4 border-b border-[#232329]">
+    <div><div id="sheet-title" class="text-[14px] font-semibold"></div>
+    <div id="sheet-desc" class="text-[12px] text-zinc-500"></div></div>
+    <button id="sheet-close" class="btn btn-ghost ml-auto !px-2.5">✕</button>
+  </div>
+  <div id="sheet-body" class="flex-1 overflow-y-auto p-5 space-y-4"></div>
+  <div id="sheet-foot" class="px-5 py-4 border-t border-[#232329] flex gap-2 justify-end"></div>
+</aside>
+<div id="toasts" class="fixed bottom-5 right-5 z-[70] space-y-2 w-[320px]"></div>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

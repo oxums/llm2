@@ -1,1 +1,6 @@
 /target
+config.json
+config.*.json
+!.gitignore
+!config.example.json
+.env
