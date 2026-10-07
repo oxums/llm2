@@ -4,18 +4,14 @@ use bytes::Bytes;
 use futures_util::Stream;
 use std::collections::HashMap;
 
-/// Max time to wait for upstream response headers per attempt.
-/// Body streaming afterwards is unbounded (ends on client disconnect).
 pub const ATTEMPT_SEND_TIMEOUT_SECS: u64 = 90;
-
-// ---------------------------------------------------------------- base URLs
 
 pub fn default_base(provider: &str) -> Option<&'static str> {
     Some(match provider {
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com/v1",
         "google" => "https://generativelanguage.googleapis.com/v1beta",
-        "azure-openai" => return None, // needs user endpoint
+        "azure-openai" => return None,
         "mistral" => "https://api.mistral.ai/v1",
         "cohere" => "https://api.cohere.com/compatibility/v1",
         "xai" => "https://api.x.ai/v1",
@@ -46,8 +42,6 @@ pub fn base_url(provider: &str, cfg: &ProviderConfig) -> Result<String, String> 
         .ok_or_else(|| format!("provider '{provider}' needs base_url configured"))
 }
 
-/// Providers whose chat API is NOT OpenAI-compatible are handled by the
-/// dedicated translators in build_chat (anthropic, google).
 #[allow(dead_code)]
 pub fn needs_translation(provider: &str) -> bool {
     matches!(provider, "anthropic" | "google")
@@ -79,8 +73,6 @@ fn apply_headers(b: reqwest::RequestBuilder, extra: &HashMap<String, String>) ->
     b
 }
 
-/// Remove our Google-thinking helper keys so OpenAI-compatible / Azure
-/// upstreams don't see unknown fields (reasoning_effort stays: it's native).
 fn strip_thinking(body: &mut serde_json::Value) {
     if let Some(o) = body.as_object_mut() {
         for k in [
@@ -97,8 +89,6 @@ fn strip_thinking(body: &mut serde_json::Value) {
         }
     }
 }
-
-// ---------------------------------------------------------------- chat send
 
 pub struct ChatDispatch {
     pub req: reqwest::RequestBuilder,
@@ -127,8 +117,7 @@ pub fn build_chat(
     body = merge_body(body, extra_body);
     body["model"] = serde_json::Value::String(upstream_model.to_string());
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    // Google-thinking helpers must not leak to OpenAI-compatible / Azure upstreams.
-    // (anthropic/google translators build a fresh object and ignore them anyway.)
+
     if !matches!(provider, "anthropic" | "google") {
         strip_thinking(&mut body);
     }
@@ -174,7 +163,7 @@ pub fn build_chat(
         _ => {
             let base = base_url(provider, cfg)?;
             let url = format!("{}/chat/completions", base);
-            // ask for a terminal usage chunk so streamed tokens can be counted
+
             if stream && body.get("stream_options").is_none() {
                 body["stream_options"] = serde_json::json!({"include_usage": true});
             }
@@ -193,12 +182,8 @@ pub fn build_chat(
     }
 }
 
-/// Max silence between upstream SSE chunks before the stream is closed
-/// with a terminal [DONE] (bounds forever-stalled streams; normal token
-/// gaps are seconds, generation can still run for hours total).
 pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
 
-/// Close a stalled SSE stream with [DONE] after `max_idle` of silence.
 pub fn idle_guard<S, E>(upstream: S, max_idle: std::time::Duration) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
@@ -239,9 +224,6 @@ fn scan_usage(hay: &[u8]) -> Option<(u64, u64)> {
     Some((p, c))
 }
 
-/// Wrap an SSE byte stream and credit prompt/completion tokens to metrics
-/// exactly once, when a terminal usage frame passes through. Pass-through
-/// otherwise (chunk sizes unchanged, small tail buffer for split frames).
 pub fn tap_usage<S, E>(upstream: S, st: Shared) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
@@ -273,8 +255,6 @@ where
     )
 }
 
-// ---------------------------------------------------------------- anthropic
-
 fn txt_of(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
@@ -295,7 +275,7 @@ fn to_anthropic(body: &serde_json::Value, model: &str) -> Result<serde_json::Val
                 continue;
             }
             let role = if role == "assistant" { "assistant" } else { "user" };
-            // tool result messages
+
             if role == "user" {
                 if let Some(tid) = m.get("tool_call_id").and_then(|t| t.as_str()) {
                     messages.push(serde_json::json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": txt_of(content)}]}));
@@ -331,7 +311,7 @@ fn to_anthropic(body: &serde_json::Value, model: &str) -> Result<serde_json::Val
                             _ => {}
                         }
                     }
-                    // assistant tool_calls -> tool_use blocks
+
                     if role == "assistant" {
                         if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
                             for tc in tcs {
@@ -345,7 +325,7 @@ fn to_anthropic(body: &serde_json::Value, model: &str) -> Result<serde_json::Val
                 }
                 _ => {}
             }
-            // assistant tool_calls with string content
+
             if role == "assistant" {
                 if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
                     if content.is_string() {
@@ -458,8 +438,6 @@ pub fn from_anthropic(resp: &serde_json::Value, req_model: &str) -> serde_json::
     })
 }
 
-// ---------------------------------------------------------------- google
-
 fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) -> Result<(String, serde_json::Value), String> {
     let mut contents = vec![];
     let mut system_text = String::new();
@@ -473,7 +451,7 @@ fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) ->
                 continue;
             }
             if m.get("tool_call_id").and_then(|t| t.as_str()).is_some() {
-                // tool result -> functionResponse (need name; approximate)
+
                 contents.push(serde_json::json!({"role": "user", "parts": [{"text": txt_of(content)}]}));
                 continue;
             }
@@ -546,13 +524,7 @@ fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) ->
             }
         }
     }
-    // ---- thinking summaries: ON by default, off with disable_thinking_summaries ----
-    // OpenAI-style knobs (all optional, stripped before upstream for non-Google):
-    //   disable_thinking_summaries: bool (default false)
-    //   include_thoughts: bool (explicit override; disable flag wins)
-    //   thinking_level | thinkingLevel | reasoning_effort: minimal|low|medium|high
-    //   thinking_budget | thinkingBudget: int (Gemini 2.5 style; exclusive with level)
-    //   thinking_config | thinkingConfig: object (raw merge, explicit knobs win)
+
     {
         let disabled = body
             .get("disable_thinking_summaries")
@@ -590,13 +562,13 @@ fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) ->
         if let Some(l) = level {
             let norm = l.trim().to_lowercase();
             tc.insert("thinkingLevel".to_string(), serde_json::json!(norm));
-            // level and budget are mutually exclusive — level wins
+
             tc.remove("thinkingBudget");
         } else if let Some(b) = budget {
             tc.insert("thinkingBudget".to_string(), serde_json::json!(b));
             tc.remove("thinkingLevel");
         }
-        // omit when trivially disabled (default is off anyway) to keep payload minimal
+
         let trivial_off =
             tc.len() == 1 && tc.get("includeThoughts") == Some(&serde_json::json!(false));
         if !tc.is_empty() && !trivial_off {
@@ -613,7 +585,7 @@ fn to_google(body: &serde_json::Value, model: &str, base: &str, stream: bool) ->
                 if t.get("type").and_then(|x| x.as_str()) == Some("function") {
                     let f = &t["function"];
                     let mut d = serde_json::json!({"name": f.get("name"), "description": f.get("description"), "parameters": f.get("parameters").unwrap_or(&serde_json::json!({"type":"object"}))});
-                    // google schema dislikes additionalProperties/strict
+
                     strip_json_schema(&mut d);
                     decls.push(d);
                 }
@@ -683,7 +655,7 @@ pub fn from_google(resp: &serde_json::Value, req_model: &str) -> serde_json::Val
     let um = resp.get("usageMetadata");
     let pt = um.and_then(|u| u.get("promptTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
     let ct_cand = um.and_then(|u| u.get("candidatesTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
-    // thought tokens are billed — count them as completion like reasoning tokens
+
     let ct_thought = um.and_then(|u| u.get("thoughtsTokenCount")).and_then(|x| x.as_u64()).unwrap_or(0);
     let ct = ct_cand + ct_thought;
     let mut msg = serde_json::json!({"role": "assistant", "content": text});
@@ -701,8 +673,6 @@ pub fn from_google(resp: &serde_json::Value, req_model: &str) -> serde_json::Val
         "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
     })
 }
-
-// ---------------------------------------------------------------- SSE translate
 
 struct ToolAcc {
     id: String,
@@ -758,9 +728,8 @@ impl StreamXlat {
         Some(self.chunk(serde_json::json!({"role": "assistant"}), None))
     }
 
-    /// feed raw upstream bytes; returns translated SSE bytes to forward
     pub fn feed(&mut self, data: &[u8]) -> Vec<Bytes> {
-        // strip CR so both \n\n and \r\n\r\n framing split correctly
+
         self.buf.extend(data.iter().filter(|b| **b != b'\r'));
         let mut out = vec![];
         loop {
@@ -769,7 +738,7 @@ impl StreamXlat {
                 None => break,
             };
             let frame: Vec<u8> = self.buf.drain(..pos).collect();
-            // strip trailing newlines
+
             let text = String::from_utf8_lossy(&frame).to_string();
             for line in text.lines() {
                 let line = line.trim();
@@ -894,7 +863,7 @@ impl StreamXlat {
                 if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
                     if !t.is_empty() {
                         if is_thought {
-                            // thought summaries stream as reasoning deltas (progress)
+
                             out.push(self.chunk(serde_json::json!({"reasoning_content": t}), None));
                         } else {
                             out.push(self.chunk(serde_json::json!({"content": t}), None));
@@ -938,7 +907,6 @@ impl StreamXlat {
         self.done
     }
 
-    /// Graceful terminator when upstream closes without a stop event.
     pub fn finish(&mut self) -> Vec<Bytes> {
         if self.done || !self.role_sent {
             return vec![];
@@ -968,7 +936,6 @@ fn find_double_nl(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// Wrap an upstream byte stream into a translated SSE stream.
 pub fn translated_stream<S, E>(kind: TranslatedKind, req_model: String, upstream: S) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -1005,9 +972,6 @@ where
     })
 }
 
-// ---------------------------------------------------------------- decisions
-
-/// Send a Decisions request. source: "typesafe" | "openrouter".
 pub async fn send_decision(
     http: &reqwest::Client,
     source: &str,

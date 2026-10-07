@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ---------- top-level ----------
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -19,7 +17,7 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Proxy + admin API key. Empty means "take from API_KEY env or default admin".
+
     #[serde(default)]
     pub api_key: String,
 }
@@ -37,12 +35,6 @@ fn default_port() -> u16 {
     3000
 }
 
-// ---------- providers ----------
-
-/// Provider ids (lowercase): openai, anthropic, google, google-vertex,
-/// azure-openai, mistral, cohere, xai, deepseek, groq, togetherai, fireworks,
-/// deepinfra, cerebras, perplexity, amazon-bedrock, elevenlabs, openrouter,
-/// ollama, lmstudio, vercel, typesafe, openai-compatible
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProviderConfig {
     #[serde(default)]
@@ -51,10 +43,10 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
-    /// null = all fetched models; otherwise allowlist of upstream model ids
+
     #[serde(default)]
     pub enabled_models: Option<Vec<String>>,
-    /// azure only
+
     #[serde(default)]
     pub api_version: Option<String>,
 }
@@ -65,8 +57,6 @@ impl ProviderConfig {
     }
 }
 
-// ---------- aliases ----------
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AliasConfig {
     #[serde(default)]
@@ -75,7 +65,7 @@ pub struct AliasConfig {
     pub pick_mode: String,
     #[serde(default)]
     pub order: Vec<String>,
-    /// image|audio|video|pdf -> auto|on|off
+
     #[serde(default)]
     pub capabilities_spoof: HashMap<String, String>,
     #[serde(default)]
@@ -98,7 +88,6 @@ fn default_pick_mode() -> String {
     "failover".to_string()
 }
 
-/// Key format: "provider/model" (upstream id may itself contain slashes).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AliasModelConfig {
     #[serde(default = "default_true")]
@@ -107,7 +96,7 @@ pub struct AliasModelConfig {
     pub extra_headers: HashMap<String, String>,
     #[serde(default)]
     pub extra_body: serde_json::Value,
-    /// modality -> force value. absent = inherit from catalog.
+
     #[serde(default)]
     pub capabilities_override: HashMap<String, bool>,
     #[serde(default)]
@@ -122,7 +111,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClassifierConfig {
-    /// jev | text_structured
+
     #[serde(default = "default_clf_backend")]
     pub backend: String,
     #[serde(default = "default_clf_model")]
@@ -166,8 +155,6 @@ fn default_clf_timeout() -> u64 {
     15000
 }
 
-// ---------- loading ----------
-
 pub fn default_config_path() -> String {
     std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string())
 }
@@ -177,7 +164,7 @@ pub fn load_config(path: &str) -> AppConfig {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    // env overlay for server
+
     if let Ok(h) = std::env::var("HOST") {
         if !h.is_empty() {
             cfg.server.host = h;

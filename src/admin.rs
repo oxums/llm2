@@ -9,12 +9,11 @@ use axum::Json;
 use serde_json::Value;
 
 fn need_auth<'a>(st: &Shared, h: &'a HeaderMap) -> bool {
-    // sync wrapper not possible (async); callers check inline
+
     let _ = (st, h);
     true
 }
 
-// GET /api/me
 pub async fn me(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -22,7 +21,6 @@ pub async fn me(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRespon
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
-// GET /api/stats
 pub async fn stats(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -40,7 +38,6 @@ pub async fn stats(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRes
     .into_response()
 }
 
-// GET /api/providers
 pub async fn list_providers(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -71,7 +68,7 @@ pub async fn list_providers(State(st): State<Shared>, headers: HeaderMap) -> imp
             "kind": provider_kind(id),
         }));
     }
-    // custom providers present in config but not in fixed list
+
     for (id, p) in &cfg.providers {
         if !provider_ids().contains(&id.as_str()) {
             out.push(serde_json::json!({
@@ -103,7 +100,6 @@ fn provider_kind(id: &str) -> &'static str {
     }
 }
 
-// PUT /api/providers/:id
 pub async fn put_provider(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>, Json(patch): Json<Value>) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -142,14 +138,13 @@ pub async fn put_provider(State(st): State<Shared>, headers: HeaderMap, Path(id)
     if let Err(e) = save_config(&path, &snapshot) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "save", e).into_response();
     }
-    // refresh catalog in background (link state may have changed)
+
     let st2 = st.clone();
     tokio::spawn(async move { refresh_now(&st2).await });
     tracing::info!(provider = %id, "provider updated");
     Json(serde_json::json!({"ok": true, "id": id})).into_response()
 }
 
-// GET /api/aliases
 pub async fn list_aliases(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -179,7 +174,6 @@ fn is_known_decision_slug(slug: &str) -> bool {
     crate::catalog::OPENROUTER_DECISION_ALLOW.iter().any(|a| *a == slug.to_lowercase())
 }
 
-// PUT /api/aliases/:name
 pub async fn put_alias(State(st): State<Shared>, headers: HeaderMap, Path(name): Path<String>, Json(a): Json<AliasConfig>) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -190,7 +184,7 @@ pub async fn put_alias(State(st): State<Shared>, headers: HeaderMap, Path(name):
     if !["jev", "text_structured"].contains(&a.classifier.backend.as_str()) {
         return err(StatusCode::BAD_REQUEST, "bad_backend", "classifier.backend must be jev|text_structured").into_response();
     }
-    // kind uniformity check
+
     {
         let cfg = st.config.read().await;
         let cat = st.catalog.read().await;
@@ -225,7 +219,6 @@ pub async fn put_alias(State(st): State<Shared>, headers: HeaderMap, Path(name):
     Json(serde_json::json!({"ok": true, "id": name})).into_response()
 }
 
-// DELETE /api/aliases/:name
 pub async fn del_alias(State(st): State<Shared>, headers: HeaderMap, Path(name): Path<String>) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
@@ -245,14 +238,13 @@ pub async fn del_alias(State(st): State<Shared>, headers: HeaderMap, Path(name):
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
-// GET /api/catalog
 pub async fn catalog_view(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();
     }
     let cat = st.catalog.read().await;
     let cfg = st.config.read().await;
-    // group: provider -> [{id, name, caps}]
+
     let mut groups: std::collections::HashMap<String, Vec<Value>> = Default::default();
     for c in cat.models.values() {
         groups.entry(c.provider.clone()).or_default().push(serde_json::json!({
@@ -275,7 +267,6 @@ pub async fn catalog_view(State(st): State<Shared>, headers: HeaderMap) -> impl 
     .into_response()
 }
 
-// POST /api/reload
 pub async fn reload(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers).await {
         return err(StatusCode::UNAUTHORIZED, "auth", "invalid key").into_response();

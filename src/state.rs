@@ -8,16 +8,16 @@ use std::time::Instant;
 pub type Shared = Arc<Inner>;
 
 pub struct Inner {
-    /// Arc-swapped: readers clone the Arc (no deep copy under lock).
+
     pub config: tokio::sync::RwLock<std::sync::Arc<AppConfig>>,
     pub config_path: String,
     pub api_key: tokio::sync::RwLock<String>,
     pub http: reqwest::Client,
-    /// Arc-swapped for the same reason.
+
     pub catalog: tokio::sync::RwLock<std::sync::Arc<Catalog>>,
-    /// model key -> cooldown expiry
+
     pub cooldowns: DashMap<String, Instant>,
-    /// alias name -> round robin counter
+
     pub rr: DashMap<String, AtomicU64>,
     pub metrics: Metrics,
 }
@@ -93,8 +93,6 @@ pub fn err(status: axum::http::StatusCode, code: &str, msg: impl Into<String>) -
     )
 }
 
-/// Split "provider:model" or "provider/model" into (provider, upstream_id).
-/// Provider is lowercased; upstream id keeps original case.
 pub fn split_ref(s: &str) -> Option<(String, String)> {
     let s = s.trim();
     if s.is_empty() {
@@ -114,8 +112,7 @@ pub fn split_ref(s: &str) -> Option<(String, String)> {
         if p.is_empty() || m.is_empty() {
             return None;
         }
-        // guard: bare model names without provider look like "gpt-4o" (no slash).
-        // "a/b/c" -> provider "a", upstream "b/c".
+
         return Some((p.to_lowercase(), m.to_string()));
     }
     None

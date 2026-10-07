@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-// ---------------------------------------------------------------- flags
-
 #[derive(Debug, Clone, Default)]
 pub struct Flags {
     pub ignore: Vec<String>,
@@ -43,7 +41,6 @@ pub fn extract_flags(body: &mut Value, headers: &axum::http::HeaderMap) -> Flags
     f.only_models = body.get("only_models").map(parse_list_owned);
     f.prefer_ignore_cooldown = body.get("prefer_models_ignore_cooldown").and_then(|v| v.as_bool()).unwrap_or(true);
 
-    // headers win when present
     if let Some(v) = header_list(headers, "x-ignore-models") {
         f.ignore = v;
     }
@@ -70,7 +67,7 @@ pub fn extract_flags(body: &mut Value, headers: &axum::http::HeaderMap) -> Flags
             f.prefer_ignore_cooldown = false;
         }
     }
-    // strip from body so upstream never sees them
+
     if let Some(o) = body.as_object_mut() {
         for k in ["ignore_models", "prefer_models", "any_prefer_provider", "only_providers", "only_models", "prefer_models_ignore_cooldown"] {
             o.remove(k);
@@ -83,9 +80,6 @@ fn parse_list_owned(v: &Value) -> Vec<String> {
     parse_list(Some(v))
 }
 
-// ---------------------------------------------------------------- matching
-
-/// pattern: "provider:model" | "provider/model" | "any:x" | bare "x" (any provider)
 pub fn key_matches(pattern: &str, provider: &str, model: &str) -> bool {
     let p = pattern.trim();
     if p.is_empty() {
@@ -103,8 +97,6 @@ pub fn key_matches(pattern: &str, provider: &str, model: &str) -> bool {
 pub fn any_matches(patterns: &[String], provider: &str, model: &str) -> bool {
     patterns.iter().any(|p| key_matches(p, provider, model))
 }
-
-// ---------------------------------------------------------------- candidates
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -138,7 +130,6 @@ pub fn parse_target(model_field: &str, aliases: &HashMap<String, crate::config::
     split_ref(m).map(|(provider, model)| Target::Direct { provider, model })
 }
 
-/// Scan chat body for required input modalities + audio output.
 pub fn required_modalities(body: &Value) -> Vec<String> {
     let mut req = vec![];
     let mut need = |s: &str| {
@@ -208,7 +199,6 @@ fn member_caps(member_key: &str, provider: &str, model: &str, alias: &AliasConfi
     c
 }
 
-/// Expand alias members to candidates (enabled only).
 pub fn alias_candidates(alias_name: &str, cfg: &AppConfig, catalog: &Catalog) -> Vec<Candidate> {
     let alias = match cfg.aliases.get(alias_name) {
         Some(a) => a,
@@ -230,9 +220,6 @@ pub fn alias_candidates(alias_name: &str, cfg: &AppConfig, catalog: &Catalog) ->
     out
 }
 
-/// Base sequence for an alias: explicit `order` first (in listed order),
-/// then any remaining members. Applies to EVERY pick mode (failover walks it,
-/// round-robin rotates from it, classifier falls back along it).
 pub fn order_for_pick(alias: &AliasConfig, mut cands: Vec<Candidate>) -> Vec<Candidate> {
     if alias.order.is_empty() {
         return cands;
@@ -252,18 +239,18 @@ pub fn order_for_pick(alias: &AliasConfig, mut cands: Vec<Candidate>) -> Vec<Can
 }
 
 pub fn apply_flags(mut cands: Vec<Candidate>, f: &Flags) -> Vec<Candidate> {
-    // only_* intersection
+
     if let Some(ops) = &f.only_providers {
         cands.retain(|c| ops.iter().any(|o| o == &c.provider.to_lowercase()));
     }
     if let Some(oms) = &f.only_models {
         cands.retain(|c| any_matches(oms, &c.provider, &c.model));
     }
-    // ignore
+
     if !f.ignore.is_empty() {
         cands.retain(|c| !any_matches(&f.ignore, &c.provider, &c.model));
     }
-    // any_prefer_provider boost (stable: keep relative order otherwise)
+
     if let Some(p) = &f.any_prefer_provider {
         let mut hit = vec![];
         let mut rest = vec![];
@@ -274,14 +261,14 @@ pub fn apply_flags(mut cands: Vec<Candidate>, f: &Flags) -> Vec<Candidate> {
                 rest.push(c);
             }
         }
-        // mark preferred
+
         for c in hit.iter_mut() {
             c.preferred = true;
         }
         hit.extend(rest);
         cands = hit;
     }
-    // prefer_models reorder (wins over any_prefer boost)
+
     if !f.prefer.is_empty() {
         let mut ranked: Vec<(usize, Candidate)> = vec![];
         let mut rest = vec![];
@@ -319,8 +306,6 @@ pub fn filter_modalities(cands: Vec<Candidate>, required: &[String], alias: Opti
     }).collect()
 }
 
-// ---------------------------------------------------------------- cooldowns
-
 pub fn cd_key(provider: &str, model: &str) -> String {
     format!("{provider}/{model}")
 }
@@ -339,10 +324,6 @@ pub fn cool(st: &Shared, key: &str) {
     st.cooldowns.insert(key.to_string(), Instant::now() + Duration::from_secs(60));
 }
 
-/// Partition candidates: fresh first, cooled-down last (stable within groups).
-/// Preferred picks bypass cooldown when allowed. Single pass over the result
-/// tries everything exactly once — cooled members are retried immediately in
-/// turn if nothing fresh is left, then the request fails fast.
 pub fn order_by_cooldown(mut cands: Vec<Candidate>, st: &Shared, flags: &Flags) -> Vec<Candidate> {
     let mut fresh = vec![];
     let mut cooled = vec![];
@@ -358,17 +339,13 @@ pub fn order_by_cooldown(mut cands: Vec<Candidate>, st: &Shared, flags: &Flags) 
     fresh
 }
 
-// ---------------------------------------------------------------- picking
-
-/// Round-robin pick index for a key.
 pub fn rr_pick(st: &Shared, key: &str, n: usize) -> usize {
     let e = st.rr.entry(key.to_string()).or_insert_with(|| std::sync::atomic::AtomicU64::new(0));
     (e.fetch_add(1, Ordering::Relaxed) as usize) % n.max(1)
 }
 
 pub fn alias_kind(models: &std::collections::HashMap<String, crate::config::AliasModelConfig>, catalog: &Catalog) -> &'static str {
-    // decision membership is determined by decision catalog at proxy time;
-    // here: embedding if all members look like embeddings (heuristic), else chat.
+
     if models.is_empty() {
         return "chat";
     }

@@ -13,8 +13,6 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-// ---------------------------------------------------------------- auth
-
 pub async fn authorized(st: &Shared, headers: &HeaderMap) -> bool {
     let want = st.api_key.read().await.clone();
     if let Some(h) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
@@ -45,7 +43,6 @@ fn record(st: &Shared, t0: Instant, ok: bool, usage: Option<&Value>) {
     }
 }
 
-/// Tag a success response with the actually-chosen model (`provider/model`).
 fn with_chosen(r: axum::response::Response, routed: &str) -> axum::response::Response {
     let mut r = r;
     if let Ok(v) = routed.parse::<axum::http::HeaderValue>() {
@@ -54,8 +51,6 @@ fn with_chosen(r: axum::response::Response, routed: &str) -> axum::response::Res
     }
     r
 }
-
-// ---------------------------------------------------------------- /v1/models
 
 pub async fn models(State(st): State<Shared>, headers: HeaderMap, q: axum::extract::Query<HashMap<String, String>>) -> impl axum::response::IntoResponse {
     if !authorized(&st, &headers).await {
@@ -73,7 +68,7 @@ pub async fn models(State(st): State<Shared>, headers: HeaderMap, q: axum::extra
             if c.embedding {
                 continue;
             }
-            // respect provider enabled_models for exposure
+
             if let Some(pc) = cfg.providers.get(&c.provider) {
                 if let Some(allow) = &pc.enabled_models {
                     if !allow.iter().any(|m| m == &c.id) {
@@ -107,7 +102,7 @@ pub async fn models(State(st): State<Shared>, headers: HeaderMap, q: axum::extra
 }
 
 fn is_decision_member(cat: &Catalog, member_key: &str) -> bool {
-    // member "openrouter/cloudflare/clef" or "typesafe/jev-latest"
+
     if let Some(rest) = member_key.strip_prefix("openrouter/") {
         return cat.decisions.iter().any(|d| d.source == "openrouter" && d.slug == rest);
     }
@@ -117,8 +112,6 @@ fn is_decision_member(cat: &Catalog, member_key: &str) -> bool {
     }
     false
 }
-
-// ---------------------------------------------------------------- chat
 
 pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value>) -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
@@ -149,7 +142,6 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
         }
     };
 
-    // build candidate list
     let required = required_modalities(&b);
     let (cands, alias_cfg, routed_alias): (Vec<Candidate>, Option<crate::config::AliasConfig>, Option<String>) = match &target {
         Target::Direct { provider, model } => {
@@ -157,7 +149,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                 record(&st, t0, false, None);
                 return err(StatusCode::BAD_REQUEST, "unknown_provider", format!("unknown provider '{provider}'")).into_response();
             }
-            // enabled_models gate
+
             if let Some(pc) = cfg.providers.get(provider) {
                 if let Some(allow) = &pc.enabled_models {
                     if !allow.iter().any(|m| m == model) {
@@ -167,7 +159,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                 }
             }
             let c = Candidate { provider: provider.clone(), model: model.clone(), member_key: None, preferred: false };
-            // modality gate for direct too
+
             let kept = filter_modalities(vec![c], &required, None, &cat);
             if kept.is_empty() {
                 record(&st, t0, false, None);
@@ -178,16 +170,16 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
         Target::Any { model } => {
             let mut provs = cat.providers_for(model);
             if provs.is_empty() {
-                // unknown to catalog: try every linked provider (they may serve it)
+
                 provs = cfg.providers.iter().filter(|(_, p)| p.is_linked()).map(|(k, _)| k.clone()).collect();
                 provs.sort();
             }
             let mut c: Vec<Candidate> = provs.into_iter().map(|p| Candidate { provider: p, model: model.clone(), member_key: None, preferred: false }).collect();
-            // keep only linked providers + enabled allow
+
             c.retain(|x| {
                 if let Some(pc) = cfg.providers.get(&x.provider) {
                     if !pc.is_linked() && x.provider != "ollama" && x.provider != "lmstudio" && !matches!(x.provider.as_str(), "openai-compatible") {
-                        // allow keyless local providers; others need key
+
                         if crate::providers::default_base(&x.provider).map(|u| u.contains("localhost") || u.contains("127.0.0.1")).unwrap_or(false) {
                             return true;
                         }
@@ -207,7 +199,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                 record(&st, t0, false, None);
                 return err(StatusCode::NOT_FOUND, "no_provider", format!("no available provider for model '{model}'")).into_response();
             }
-            // rotate start for load balancing
+
             let idx = rr_pick(&st, &format!("any:{model}"), c.len());
             c.rotate_left(idx);
             (c, None, None)
@@ -242,7 +234,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                         ordered.push(x);
                     }
                 }
-                // stash routing info in a response header later
+
                 (ordered, Some(a), Some(format!("{name}|conf={:.2}|via={}", r.confidence, r.via)))
             } else {
                 (c, Some(a), Some(name.clone()))
@@ -250,9 +242,6 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
         }
     };
 
-    // send loop: SINGLE pass over fresh-first candidates. ANY failure cools
-    // the member and moves on; when the queue is exhausted we return the
-    // last error immediately (fail fast, no second pass, no extra calls).
     tracing::info!(
         req = %req_id,
         queue = %cands.iter().map(|c| format!("{}/{}", c.provider, c.model)).collect::<Vec<_>>().join(","),
@@ -270,7 +259,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
                 continue;
             }
         };
-        // member-level overrides
+
         let (mheaders, mbody) = member_overrides(&alias_cfg, &c);
         let disp = match providers::build_chat(&st.http, &c.provider, &pcfg, &c.model, b.clone(), &mheaders, &mbody) {
             Ok(d) => d,
@@ -316,7 +305,7 @@ pub async fn chat(State(st): State<Shared>, headers: HeaderMap, body: Json<Value
             continue;
         }
         tracing::info!(req = %req_id, provider = %c.provider, model = %c.model, status, ms = a0.elapsed().as_millis() as u64, "served");
-        // success
+
         let routed = format!("{}/{}", c.provider, c.model);
         if stream {
             let idle = std::time::Duration::from_secs(providers::STREAM_IDLE_TIMEOUT_SECS);
@@ -373,8 +362,6 @@ fn member_overrides(alias: &Option<crate::config::AliasConfig>, c: &Candidate) -
     }
     (h, b)
 }
-
-// ---------------------------------------------------------------- embeddings
 
 pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json<Value>) -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
@@ -437,11 +424,10 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
             c
         }
     };
-    // keep only embedding-capable for safety on direct refs known to chat;
-    // unknown models are attempted (provider may serve them).
+
     cands.retain(|c| {
         if c.member_key.is_some() {
-            return true; // alias kind already validated
+            return true;
         }
         match cat.get(&c.provider, &c.model) {
             Some(m) => m.embedding,
@@ -541,8 +527,6 @@ pub async fn embeddings(State(st): State<Shared>, headers: HeaderMap, body: Json
     err(last.0, "all_failed", last.1).into_response()
 }
 
-// ---------------------------------------------------------------- decisions
-
 pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<Value>) -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
     let t0 = Instant::now();
@@ -568,8 +552,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
     let cfg = st.config.read().await.clone();
     let cat = st.catalog.read().await.clone();
 
-    // candidates: (source, slug)
-    let mut cands: Vec<(String, String, Option<String>, bool)> = vec![]; // source, slug, member_key, preferred
+    let mut cands: Vec<(String, String, Option<String>, bool)> = vec![];
     if let Some(a) = cfg.aliases.get(&model_field) {
         if alias_kind_full(&model_field, &cfg, &cat, &|k| is_decision_member(&cat, k)) != "decision" {
             record(&st, t0, false, None);
@@ -577,7 +560,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
         }
         let mut keys: Vec<String> = a.models.keys().cloned().collect();
         keys.sort();
-        // order
+
         let mut ordered_keys = vec![];
         if !a.order.is_empty() {
             for o in &a.order {
@@ -601,7 +584,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
                 cands.push((s, slug, Some(k), false));
             }
         }
-        // flags on (source-as-provider, slug)
+
         cands = apply_dec_flags(cands, &flags);
         cands = order_dec_by_cooldown(cands, &st, &flags);
         if a.pick_mode == "round_robin" && !cands.is_empty() {
@@ -609,16 +592,16 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
             cands.rotate_left(idx);
         }
     } else {
-        // direct: "openrouter/cloudflare/clef" | "typesafe/jev-latest" | bare catalog slug | "any/slug"
+
         let m = model_field.strip_prefix("any:").or_else(|| model_field.strip_prefix("any/")).unwrap_or(&model_field);
-        // expand: every linked source serving it
+
         let mut opts: Vec<(String, String)> = vec![];
         if let Some(rest) = m.strip_prefix("openrouter/") {
             opts.push(("openrouter".into(), rest.to_string()));
         } else if let Some(rest) = m.strip_prefix("typesafe/") {
             let full = format!("typesafe/{rest}");
             opts.push(("typesafe".into(), full.clone()));
-            // same slug via openrouter if cataloged
+
             if cat.decisions.iter().any(|d| d.source == "openrouter" && (d.slug == full || d.slug == rest)) {
                 let slug = if cat.decisions.iter().any(|d| d.source == "openrouter" && d.slug == full) { full } else { rest.to_string() };
                 opts.push(("openrouter".into(), slug));
@@ -631,7 +614,7 @@ pub async fn decisions(State(st): State<Shared>, headers: HeaderMap, body: Json<
             record(&st, t0, false, None);
             return err(StatusCode::NOT_FOUND, "unknown_decision_model", format!("unknown decision model '{model_field}'")).into_response();
         }
-        // keep linked only
+
         opts.retain(|(s, _)| {
             if s == "typesafe" {
                 cfg.providers.get("typesafe").map(|p| p.is_linked()).unwrap_or(false)
@@ -680,13 +663,13 @@ fn decision_source_slug(member_key: &str, cat: &Catalog) -> Option<(String, Stri
         if cat.decisions.iter().any(|d| d.source == "openrouter" && d.slug == rest) {
             return Some(("openrouter".into(), rest.to_string()));
         }
-        // allow even if catalog hasn't refreshed (explicit admin config)
+
         return Some(("openrouter".into(), rest.to_string()));
     }
     if let Some(rest) = member_key.strip_prefix("typesafe/") {
         return Some(("typesafe".into(), format!("typesafe/{rest}")));
     }
-    // bare slug -> catalog source
+
     cat.decisions.iter().find(|d| d.slug == member_key).map(|d| (d.source.clone(), d.slug.clone()))
 }
 
@@ -735,8 +718,6 @@ fn order_dec_by_cooldown(
     fresh.extend(cooled);
     fresh
 }
-
-// ---------------------------------------------------------------- health
 
 pub async fn health(State(st): State<Shared>) -> Json<Value> {
     let cat = st.catalog.read().await;

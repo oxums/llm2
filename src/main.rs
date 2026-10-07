@@ -26,13 +26,12 @@ async fn main() {
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(cfg.server.port);
     let st = state::new_shared(cfg, config_path);
 
-    // initial catalog load (background; serving starts immediately)
     let st_bg = st.clone();
     tokio::spawn(async move {
         admin::refresh_now(&st_bg).await;
         tracing::info!("catalog loaded");
     });
-    // periodic refresh every 12h
+
     let st_bg2 = st.clone();
     tokio::spawn(async move {
         loop {

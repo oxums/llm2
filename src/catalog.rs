@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Normalized capabilities for one "provider/model" entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelCaps {
     pub provider: String,
@@ -19,16 +18,16 @@ pub struct ModelCaps {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionModel {
-    /// "typesafe" | "openrouter"
+
     pub source: String,
-    /// upstream slug, e.g. "typesafe/jev-1.13" or "cloudflare/clef"
+
     pub slug: String,
     pub name: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    /// key "provider/modelid(lowercased provider + original id)"
+
     pub models: HashMap<String, ModelCaps>,
     pub decisions: Vec<DecisionModel>,
     pub fetched_at: Option<String>,
@@ -42,7 +41,7 @@ impl Catalog {
     pub fn get(&self, provider: &str, id: &str) -> Option<&ModelCaps> {
         self.models.get(&Self::key(provider, id))
     }
-    /// all providers serving this upstream model id (chat pool)
+
     pub fn providers_for(&self, model_id: &str) -> Vec<String> {
         let mut out = vec![];
         for c in self.models.values() {
@@ -56,7 +55,6 @@ impl Catalog {
     }
 }
 
-/// Decision slugs we support through OpenRouter (models.dev omits these).
 pub const OPENROUTER_DECISION_ALLOW: &[&str] = &[
     "cloudflare/clef",
     "cloudflare/clef-flash",
@@ -83,12 +81,10 @@ fn modalities_of(m: &serde_json::Value) -> Vec<String> {
             }
         }
     }
-    // some dumps use attachment:true as image-ish hint; keep strict to modalities.
+
     out
 }
 
-/// Parse https://models.dev/api.json defensively. Shape:
-/// { "<provider>": { id?, name?, models: { "<modelid>": {...} } } }
 pub fn parse_models_dev(root: &serde_json::Value) -> Catalog {
     let mut cat = Catalog::default();
     let obj = match root.as_object() {
@@ -103,7 +99,7 @@ pub fn parse_models_dev(root: &serde_json::Value) -> Catalog {
             Some(m) => m,
             None => continue,
         };
-        // skip non-provider top-level keys that lack models map shape
+
         let provider = prov.to_lowercase();
         if !cat.providers_seen.contains(&provider) {
             cat.providers_seen.push(provider.clone());
@@ -143,7 +139,6 @@ pub async fn fetch_models_dev(http: &reqwest::Client) -> Option<serde_json::Valu
     resp.json::<serde_json::Value>().await.ok()
 }
 
-/// OpenRouter decisions catalog. Public endpoint; caller gates on openrouter linked.
 pub async fn fetch_openrouter_decisions(http: &reqwest::Client) -> Vec<DecisionModel> {
     let mut out = vec![];
     let resp = match http.get("https://openrouter.ai/api/v1/models?output_modalities=decisions").send().await {

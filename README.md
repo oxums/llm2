@@ -68,25 +68,14 @@ stripped before upstream):
 | `any_prefer_provider: "groq"` | `any:` only — this provider first |
 | `only_providers: [...]` / `only_models: [...]` | keep only matches |
 | `prefer_models_ignore_cooldown` (default `true`) | preferred picks bypass the 60s fail cooldown; also covers `any_prefer_provider` |
-
-Model key grammar: `provider:model`, `provider/model`, `any:model`, bare `id`
-(matches every provider).
-
-## Google thinking summaries
-
-Google models return thought summaries by default (`generationConfig.thinkingConfig.includeThoughts: true`),
-surfaced OpenAI-style as `reasoning_content` (message field, `delta.reasoning_content` while streaming)
-so progress is visible during long generations. Thought tokens are counted into `completion_tokens`.
-
-Per-request body params (also settable per alias member via `extra_body`; stripped for non-Google upstreams):
-
-| param | meaning |
-|---|---|
 | `disable_thinking_summaries: true` | opt out — no thought summaries |
 | `thinking_level: "minimal"\|"low"\|"medium"\|"high"` | Gemini 3 thinking depth (`reasoning_effort` also accepted as alias) |
 | `thinking_budget: 1024` | Gemini 2.5 token budget (exclusive with `thinking_level`) |
 | `include_thoughts: false` | explicit off (the disable flag wins when both are set) |
 | `thinking_config: {...}` | raw `thinkingConfig` merge (explicit knobs above win) |
+
+Model key grammar: `provider:model`, `provider/model`, `any:model`, bare `id`
+(matches every provider).
 
 ## Providers
 
